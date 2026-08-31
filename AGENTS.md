@@ -14,6 +14,8 @@
 
 ## 開発プロセス
 
+- GitHub Issues and Pull Requests must be written in English.
+
 ### テスト駆動開発
 
 振る舞いを追加・変更する場合や不具合を修正する場合は、原則としてテスト駆動開発で進めます。
