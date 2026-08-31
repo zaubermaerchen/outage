@@ -249,51 +249,72 @@ func TestProcessExitsOnUSR1WithInputStillOpen(t *testing.T) {
 func TestProcessExitsOnUSR1WhileStdoutPipeIsFull(t *testing.T) {
 	binary := buildOutage(t)
 	cmd := exec.Command(binary, "--event", "signal:USR1")
-	stdin, err := cmd.StdinPipe()
+	stdinRead, stdinWrite, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	writer := &blockingWriter{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-		done:    make(chan struct{}),
+	stdoutRead, stdoutWrite, err := os.Pipe()
+	if err != nil {
+		_ = stdinRead.Close()
+		_ = stdinWrite.Close()
+		t.Fatal(err)
 	}
 	stderr, err := os.CreateTemp(t.TempDir(), "stderr")
 	if err != nil {
+		_ = stdinRead.Close()
+		_ = stdinWrite.Close()
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
 		t.Fatal(err)
 	}
-	cmd.Stdout = writer
+	// Keep the read end open and unread so the child's own stdout write, rather
+	// than an os/exec copier in the parent, is what reaches backpressure.
+	cmd.Stdin = stdinRead
+	cmd.Stdout = stdoutWrite
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
+		_ = stdinRead.Close()
+		_ = stdinWrite.Close()
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
+		_ = stderr.Close()
 		t.Fatal(err)
 	}
-	type processWaitResult struct {
-		state *os.ProcessState
-		err   error
-	}
-	waitDone := make(chan processWaitResult, 1)
-	go func() {
-		state, err := cmd.Process.Wait()
-		waitDone <- processWaitResult{state: state, err: err}
-	}()
+
+	waitDone := make(chan error, 1)
 	inputDone := make(chan error, 1)
+	inputStart := make(chan struct{})
 	inputStarted := false
 	inputFinished := false
 	waited := false
+	sentinelReadDone := make(chan struct {
+		data []byte
+		err  error
+	}, 1)
+	sentinelReadStarted := false
+	sentinelReadFinished := false
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
 	t.Cleanup(func() {
-		writer.Release()
-		_ = stdin.Close()
-		_ = stderr.Close()
 		if !waited {
 			_ = cmd.Process.Kill()
+		}
+		_ = stdinWrite.Close()
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
+		_ = stderr.Close()
+		if !waited {
 			select {
 			case <-waitDone:
 			case <-time.After(5 * time.Second):
 			}
 		}
-		select {
-		case <-writer.done:
-		case <-time.After(5 * time.Second):
+		if sentinelReadStarted && !sentinelReadFinished {
+			select {
+			case <-sentinelReadDone:
+			case <-time.After(5 * time.Second):
+			}
 		}
 		if inputStarted && !inputFinished {
 			select {
@@ -303,48 +324,100 @@ func TestProcessExitsOnUSR1WhileStdoutPipeIsFull(t *testing.T) {
 		}
 	})
 
+	// os/exec has duplicated these descriptors for the child. Keep only the
+	// parent ends so closing them cannot mask the pipe state being tested.
+	if err := stdinRead.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stdoutWrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sentinel := []byte("outage-test-sentinel")
+	sentinelReadStarted = true
+	go func() {
+		data := make([]byte, len(sentinel))
+		_, err := io.ReadFull(stdoutRead, data)
+		sentinelReadDone <- struct {
+			data []byte
+			err  error
+		}{data: data, err: err}
+	}()
+	if n, err := stdinWrite.Write(sentinel); err != nil {
+		t.Fatalf("writing sentinel: %v", err)
+	} else if n != len(sentinel) {
+		t.Fatalf("sentinel write = %d bytes, want %d", n, len(sentinel))
+	}
+	select {
+	case result := <-sentinelReadDone:
+		sentinelReadFinished = true
+		if result.err != nil {
+			t.Fatalf("reading sentinel: %v", result.err)
+		}
+		if !bytes.Equal(result.data, sentinel) {
+			t.Fatalf("sentinel = %q, want %q", result.data, sentinel)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for child to copy sentinel")
+	}
+
 	inputStarted = true
 	go func() {
-		_, err := stdin.Write(bytes.Repeat([]byte("input"), 1<<20))
+		close(inputStart)
+		_, err := stdinWrite.Write(bytes.Repeat([]byte("input"), 1<<20))
 		inputDone <- err
 	}()
 	select {
-	case <-writer.started:
+	case <-inputStart:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for child stdout writer to block")
+		t.Fatal("timed out waiting for input writer to start")
+	}
+	select {
+	case err := <-inputDone:
+		inputFinished = true
+		t.Fatalf("input writer completed before stdout backpressure: %v", err)
+	case <-time.After(time.Second):
+	}
+	if err := syscall.Kill(cmd.Process.Pid, 0); err != nil {
+		t.Fatalf("child is no longer alive while input writer is blocked: %v", err)
 	}
 
 	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGUSR1); err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case result := <-waitDone:
+	case waitErr := <-waitDone:
 		waited = true
-		if result.err != nil {
+		if waitErr != nil {
 			var exitErr *exec.ExitError
-			if errors.As(result.err, &exitErr) {
+			if errors.As(waitErr, &exitErr) {
 				t.Fatalf("exit code = %d", exitErr.ExitCode())
 			}
-			t.Fatal(result.err)
+			t.Fatal(waitErr)
 		}
-		if result.state.ExitCode() != 0 {
-			t.Fatalf("exit code = %d, want 0", result.state.ExitCode())
+		if cmd.ProcessState == nil {
+			t.Fatal("child process state is nil after Wait")
+		}
+		if cmd.ProcessState.ExitCode() != 0 {
+			t.Fatalf("exit code = %d, want 0", cmd.ProcessState.ExitCode())
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for child to exit after USR1")
 	}
-	writer.Release()
-	select {
-	case <-writer.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for stdout copier cleanup")
+	if err := stdinWrite.Close(); err != nil {
+		t.Fatal(err)
 	}
-	_ = stdin.Close()
 	select {
 	case <-inputDone:
 		inputFinished = true
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for input writer cleanup")
+	}
+	if err := stdoutRead.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stderr.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
