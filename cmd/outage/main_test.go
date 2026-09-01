@@ -186,6 +186,8 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 		"signal:SIGUSR1",
 		"outage signal:USR2",
 		"signal:SIGUSR2",
+		"outage file:<path>",
+		"file:<path>",
 		"Arguments:",
 		"Options:",
 		"-h, --help",
@@ -338,6 +340,427 @@ func TestRunWithoutHelpPreservesEventPassthrough(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunFileEventExitsImmediatelyWhenPathExists(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, path string)
+	}{
+		{
+			name: "file",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("trigger"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "trigger")
+			tc.setup(t, path)
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"file:" + path}, unreadableReader{}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunFileEventExitsImmediatelyWhenDanglingSymlinkExists(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated permissions on Windows")
+	}
+
+	path := filepath.Join(t.TempDir(), "trigger")
+	if err := os.Symlink("missing-target", path); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	assertExistingFileEventExits(t, path)
+}
+
+func TestRunFileEventPreservesRelativePath(t *testing.T) {
+	dir, err := os.MkdirTemp(".", "outage-file-event-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "trigger")
+	if err := os.WriteFile(path, []byte("trigger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	assertExistingFileEventExits(t, path)
+}
+
+func TestRunFileEventPreservesColonsInPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("colon-containing filenames are not portable on Windows")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trigger:name")
+	if err := os.WriteFile(path, []byte("trigger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	assertExistingFileEventExits(t, path)
+}
+
+func assertExistingFileEventExits(t *testing.T, path string) {
+	t.Helper()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"file:" + path}, unreadableReader{}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+type fileEventReader struct {
+	payload   []byte
+	started   chan struct{}
+	release   chan struct{}
+	done      chan struct{}
+	delivered bool
+}
+
+func (r *fileEventReader) Read(p []byte) (int, error) {
+	if !r.delivered {
+		r.delivered = true
+		close(r.started)
+		return copy(p, r.payload), nil
+	}
+	<-r.release
+	close(r.done)
+	return 0, io.EOF
+}
+
+type fileEventWriter struct {
+	output   bytes.Buffer
+	copied   chan struct{}
+	notified bool
+}
+
+func (w *fileEventWriter) Write(p []byte) (int, error) {
+	n, err := w.output.Write(p)
+	if n > 0 && !w.notified {
+		w.notified = true
+		close(w.copied)
+	}
+	return n, err
+}
+
+func TestRunFileEventWaitsAndForwardsUntilPathAppears(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trigger")
+	reader := &fileEventReader{
+		payload: []byte("input before trigger"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var stderr bytes.Buffer
+	result := make(chan int, 1)
+	go func() {
+		result <- run([]string{"file:" + path}, reader, writer, &stderr)
+	}()
+
+	t.Cleanup(func() {
+		close(reader.release)
+		select {
+		case <-reader.done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for blocked reader cleanup")
+		}
+	})
+
+	select {
+	case <-reader.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for file-event input reader to start")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for input to be forwarded")
+	}
+	select {
+	case code := <-result:
+		t.Fatalf("run exited before file appeared with code %d", code)
+	default:
+	}
+
+	if err := os.WriteFile(path, []byte("trigger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-result:
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for file event")
+	}
+
+	if got := writer.output.String(); got != "input before trigger" {
+		t.Fatalf("stdout = %q, want %q", got, "input before trigger")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunFileEventExitsWhenDanglingSymlinkAppears(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated permissions on Windows")
+	}
+
+	path := filepath.Join(t.TempDir(), "trigger")
+	reader := &fileEventReader{
+		payload: []byte("input before dangling symlink"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var stderr bytes.Buffer
+	result := make(chan int, 1)
+	readerStarted := false
+	finished := false
+	t.Cleanup(func() {
+		if readerStarted {
+			close(reader.release)
+			select {
+			case <-reader.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for blocked reader cleanup")
+			}
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for run cleanup")
+			}
+		}
+	})
+
+	go func() {
+		result <- run([]string{"file:" + path}, reader, writer, &stderr)
+	}()
+
+	select {
+	case <-reader.started:
+		readerStarted = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for file-event input reader to start")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for input to be forwarded")
+	}
+	select {
+	case code := <-result:
+		t.Fatalf("run exited before dangling symlink appeared with code %d", code)
+	default:
+	}
+
+	if err := os.Symlink("missing-target", path); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("path mode = %v, want symlink", info.Mode())
+	}
+
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for dangling symlink file event")
+	}
+	if got := writer.output.String(); got != "input before dangling symlink" {
+		t.Fatalf("stdout = %q, want %q", got, "input before dangling symlink")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunFileEventContinuesAfterTransientStatError(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	target := filepath.Join(parent, "trigger")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &fileEventReader{
+		payload: []byte("input before transient stat error"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var stderr bytes.Buffer
+	result := make(chan int, 1)
+	readerStarted := false
+	finished := false
+	go func() {
+		result <- run([]string{"file:" + target}, reader, writer, &stderr)
+	}()
+
+	t.Cleanup(func() {
+		if readerStarted {
+			close(reader.release)
+			select {
+			case <-reader.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for blocked reader cleanup")
+			}
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for run cleanup")
+			}
+		}
+	})
+
+	select {
+	case <-reader.started:
+		readerStarted = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for file-event input reader to start")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for input to be forwarded")
+	}
+
+	if err := os.Remove(parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parent, []byte("temporarily not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IsDir() {
+		t.Fatalf("parent path is a directory, want a regular file")
+	}
+
+	// The input/output handshakes above establish that run reached its select.
+	// Keep the observable ENOTDIR state across several polling intervals so the
+	// monitor must encounter the transient error before the parent is restored.
+	for i := 0; i < 3; i++ {
+		select {
+		case code := <-result:
+			finished = true
+			t.Fatalf("run exited while parent was a regular file with code %d", code)
+		case <-time.After(filePollInterval):
+		}
+		info, err := os.Stat(parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.IsDir() {
+			t.Fatalf("parent path became a directory before restoration")
+		}
+	}
+
+	if err := os.Remove(parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("trigger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case code := <-result:
+		finished = true
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for file event after transient stat error")
+	}
+	if got := writer.output.String(); got != "input before transient stat error" {
+		t.Fatalf("stdout = %q, want %q", got, "input before transient stat error")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunRejectsEmptyFileEvent(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"file:"}, unreadableReader{}, &stdout, &stderr)
+	if code != exitArgError {
+		t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitArgError, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if stderr.Len() == 0 {
+		t.Fatal("stderr is empty, want argument diagnostic")
+	}
+}
+
+func TestRunRejectsFileEventWithInvalidPath(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"file:" + string([]byte{0})}, unreadableReader{}, &stdout, &stderr)
+	if code != exitArgError {
+		t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitArgError, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if stderr.Len() == 0 {
+		t.Fatal("stderr is empty, want argument diagnostic")
 	}
 }
 
