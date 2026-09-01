@@ -9,13 +9,13 @@ USR1 and let the resulting pipe closure propagate naturally upstream.
 ## Usage
 
 ```sh
-producer | outage --event signal:USR1 | consumer
+producer | outage signal:USR1 | consumer
 ```
 
 `signal:SIGUSR1` is an equivalent, case-sensitive alias:
 
 ```sh
-producer | outage --event signal:SIGUSR1 | consumer
+producer | outage signal:SIGUSR1 | consumer
 ```
 
 Normal forwarding:
@@ -50,8 +50,8 @@ and the producer. Stopping the producer itself is not guaranteed.
 
 ## Command-line interface
 
-- Normal operation requires exactly one `--event` option. v0.1.0 supports
-  `signal:USR1` and its case-sensitive `signal:SIGUSR1` alias.
+- Normal operation requires exactly one positional event specification. v0.1.0
+  supports `signal:USR1` and its case-sensitive `signal:SIGUSR1` alias.
 - `-h` and `--help` display help. A help token has highest priority wherever it
   appears in the argument list, even alongside invalid arguments or `--version`.
 - Standalone `--version` prints the version.

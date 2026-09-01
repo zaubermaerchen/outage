@@ -77,7 +77,7 @@ func TestRunExitsOnUSR1WhileInputIsBlocked(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	result := make(chan int, 1)
 	go func() {
-		result <- run([]string{"--event", "signal:USR1"}, reader, &stdout, &stderr)
+		result <- run([]string{"signal:USR1"}, reader, &stdout, &stderr)
 	}()
 
 	<-reader.started
@@ -102,7 +102,7 @@ func TestRunExitsOnUSR1WhileOutputIsBlocked(t *testing.T) {
 	var stderr bytes.Buffer
 	result := make(chan int, 1)
 	go func() {
-		result <- run([]string{"--event", "signal:SIGUSR1"}, bytes.NewReader([]byte("payload")), writer, &stderr)
+		result <- run([]string{"signal:SIGUSR1"}, bytes.NewReader([]byte("payload")), writer, &stderr)
 	}()
 
 	<-writer.started
@@ -120,7 +120,7 @@ func TestRunExitsOnUSR1WhileOutputIsBlocked(t *testing.T) {
 
 func TestProcessHandlesClosedStdinPipe(t *testing.T) {
 	binary := buildOutage(t)
-	cmd := exec.Command(binary, "--event", "signal:USR1")
+	cmd := exec.Command(binary, "signal:USR1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +161,7 @@ func TestProcessHandlesClosedStdinPipe(t *testing.T) {
 
 func TestProcessExitsOnUSR1WithInputStillOpen(t *testing.T) {
 	binary := buildOutage(t)
-	cmd := exec.Command(binary, "--event", "signal:USR1")
+	cmd := exec.Command(binary, "signal:USR1")
 	stdinRead, stdinWrite, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +248,7 @@ func TestProcessExitsOnUSR1WithInputStillOpen(t *testing.T) {
 
 func TestProcessExitsOnUSR1WhileStdoutPipeIsFull(t *testing.T) {
 	binary := buildOutage(t)
-	cmd := exec.Command(binary, "--event", "signal:USR1")
+	cmd := exec.Command(binary, "signal:USR1")
 	stdinRead, stdinWrite, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -423,7 +423,7 @@ func TestProcessExitsOnUSR1WhileStdoutPipeIsFull(t *testing.T) {
 
 func TestRunReportsEPIPE(t *testing.T) {
 	var stderr bytes.Buffer
-	code := run([]string{"--event", "signal:USR1"}, strings.NewReader("input"), failingWriter{err: syscall.EPIPE}, &stderr)
+	code := run([]string{"signal:USR1"}, strings.NewReader("input"), failingWriter{err: syscall.EPIPE}, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -434,7 +434,7 @@ func TestRunReportsEPIPE(t *testing.T) {
 
 func TestProcessReportsDownstreamClosure(t *testing.T) {
 	binary := buildOutage(t)
-	cmd := exec.Command(binary, "--event", "signal:SIGUSR1")
+	cmd := exec.Command(binary, "signal:SIGUSR1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
