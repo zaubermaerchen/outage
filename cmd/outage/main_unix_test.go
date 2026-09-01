@@ -57,6 +57,13 @@ func sendUSR1(t *testing.T) {
 	}
 }
 
+func sendUSR2(t *testing.T) {
+	t.Helper()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGUSR2); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitForResult(t *testing.T, result <-chan int) int {
 	t.Helper()
 	select {
@@ -115,6 +122,41 @@ func TestRunExitsOnUSR1WhileOutputIsBlocked(t *testing.T) {
 	case <-writer.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for blocked writer cleanup")
+	}
+}
+
+func TestRunExitsOnUSR2WhileInputIsBlocked(t *testing.T) {
+	for _, event := range []string{"signal:USR2", "signal:SIGUSR2"} {
+		t.Run(event, func(t *testing.T) {
+			reader := &blockingReader{
+				started: make(chan struct{}),
+				release: make(chan struct{}),
+				done:    make(chan struct{}),
+			}
+			t.Cleanup(func() {
+				close(reader.release)
+				select {
+				case <-reader.done:
+				case <-time.After(5 * time.Second):
+					t.Errorf("timed out waiting for blocked reader cleanup")
+				}
+			})
+			var stdout, stderr bytes.Buffer
+			result := make(chan int, 1)
+			go func() {
+				result <- run([]string{event}, reader, &stdout, &stderr)
+			}()
+
+			select {
+			case <-reader.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for blocked reader to start")
+			}
+			sendUSR2(t)
+			if code := waitForResult(t, result); code != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+			}
+		})
 	}
 }
 
