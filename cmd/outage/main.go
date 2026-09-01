@@ -1,7 +1,7 @@
 package main
 
-// This file validates command-line arguments and coordinates version output
-// and stream copying.
+// This file validates command-line arguments and coordinates event monitoring,
+// version output, and stream copying.
 
 import (
 	"errors"
@@ -21,14 +21,17 @@ const helpText = `Usage: outage signal:USR1
        outage signal:SIGUSR1
        outage signal:USR2
        outage signal:SIGUSR2
+       outage file:<path>
 
 Copy stdin to stdout until the event is received. Receiving the event exits outage;
 it does not send a signal directly to the producer.
 Signal events are unsupported on Windows.
+File events exit when the specified path exists.
 
 Arguments:
   signal:USR1                Exit on USR1 (signal:SIGUSR1 is an alias).
   signal:USR2                Exit on USR2 (signal:SIGUSR2 is an alias).
+  file:<path>                Exit when the specified path exists.
 Options:
   --version                 Print the version (standalone).
   -h, --help                Show this help.
@@ -68,8 +71,23 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 		return exitArgError
 	}
 
-	signalCh, stopSignalMonitor := installSignalMonitor(args[0])
-	defer stopSignalMonitor()
+	event := args[0]
+	var eventCh <-chan os.Signal
+	var stopEventMonitor func()
+	if strings.HasPrefix(event, "file:") {
+		path := strings.TrimPrefix(event, "file:")
+		if _, err := os.Stat(path); err == nil {
+			return exitOK
+		} else if !os.IsNotExist(err) {
+			writeDiagnostic(errOut, err)
+			return exitArgError
+		}
+		ignoreSIGPIPE()
+		eventCh, stopEventMonitor = installFileMonitor(path)
+	} else {
+		eventCh, stopEventMonitor = installSignalMonitor(event)
+	}
+	defer stopEventMonitor()
 
 	copyDone := make(chan error, 1)
 	go func() {
@@ -78,7 +96,7 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 	}()
 
 	select {
-	case <-signalCh:
+	case <-eventCh:
 		return exitOK
 	case err := <-copyDone:
 		if err != nil {
@@ -101,6 +119,13 @@ func validateArgs(args []string) error {
 	}
 
 	event := args[0]
+	if strings.HasPrefix(event, "file:") {
+		if strings.TrimPrefix(event, "file:") == "" {
+			return fmt.Errorf("invalid file event %q", event)
+		}
+		return nil
+	}
+
 	if event != "signal:USR1" && event != "signal:SIGUSR1" &&
 		event != "signal:USR2" && event != "signal:SIGUSR2" {
 		return fmt.Errorf("unsupported event %q", event)

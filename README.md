@@ -26,6 +26,17 @@ producer | outage signal:USR2 | consumer
 producer | outage signal:SIGUSR2 | consumer
 ```
 
+To exit when a path exists, use a positional file event:
+
+```sh
+producer | outage file:/tmp/foo | consumer
+```
+
+The file event triggers immediately when `/tmp/foo` already exists. Otherwise,
+`outage` polls for the path while continuing to forward stdin to stdout. Any
+existing path, including a directory, triggers the event; the path after the
+first `file:` prefix is passed through unchanged.
+
 Normal forwarding:
 
 ```text
@@ -59,9 +70,11 @@ and the producer. Stopping the producer itself is not guaranteed.
 
 ## Command-line interface
 
-- Normal operation requires exactly one positional event specification. v0.1.0
+- Normal operation requires exactly one positional event specification. The CLI
   supports `signal:USR1` and `signal:USR2`, plus their case-sensitive
-  `signal:SIGUSR1` and `signal:SIGUSR2` aliases.
+  `signal:SIGUSR1` and `signal:SIGUSR2` aliases. `file:<path>` exits when the
+  path exists, waiting and forwarding stdin to stdout if it is not present yet.
+  The path may be relative or absolute and may contain colons.
 - `-h` and `--help` display help. A help token has highest priority wherever it
   appears in the argument list, even alongside invalid arguments or `--version`.
 - Standalone `--version` prints the version.
@@ -70,8 +83,8 @@ and the producer. Stopping the producer itself is not guaranteed.
 
 USR1 and USR2 events are supported on the Unix systems covered by the
 implementation, including Linux and macOS. Windows builds support help and
-version output, but reject signal events as unsupported and provide no
-alternative event.
+version output, and support portable polling for `file:<path>` events. Signal
+events remain unsupported on Windows.
 
 ## Release builds
 
