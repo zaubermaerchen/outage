@@ -188,6 +188,8 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 		"signal:SIGUSR2",
 		"outage file:<path>",
 		"file:<path>",
+		"outage duration:<value>",
+		"duration:<value>",
 		"Arguments:",
 		"Options:",
 		"-h, --help",
@@ -383,6 +385,122 @@ func TestRunFileEventExitsImmediatelyWhenPathExists(t *testing.T) {
 			}
 			if stderr.Len() != 0 {
 				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunDurationEventExitsImmediatelyWithoutReadingStdin(t *testing.T) {
+	for _, value := range []string{"0", "0s", "0ms"} {
+		t.Run(value, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"duration:" + value}, unreadableReader{}, &stdout, &stderr)
+			if code != exitOK {
+				t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
+
+func TestValidateDurationEventAcceptsGoDurationSyntax(t *testing.T) {
+	for _, event := range []string{"duration:30s", "duration:500ms", "duration:1m30s"} {
+		t.Run(event, func(t *testing.T) {
+			if err := validateArgs([]string{event}); err != nil {
+				t.Fatalf("validateArgs(%q) = %v, want nil", event, err)
+			}
+		})
+	}
+}
+
+func TestRunDurationEventForwardsAndExitsWithoutEOF(t *testing.T) {
+	const duration = 250 * time.Millisecond
+
+	reader := &fileEventReader{
+		payload: []byte("input before duration"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var stderr bytes.Buffer
+	result := make(chan int, 1)
+	startedAt := time.Now()
+	readerStarted := false
+	finished := false
+	go func() {
+		result <- run([]string{"duration:" + duration.String()}, reader, writer, &stderr)
+	}()
+
+	t.Cleanup(func() {
+		if readerStarted {
+			close(reader.release)
+			select {
+			case <-reader.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for blocked reader cleanup")
+			}
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for run cleanup")
+			}
+		}
+	})
+
+	select {
+	case <-reader.started:
+		readerStarted = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for duration-event input reader to start")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for input to be forwarded")
+	}
+
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+		}
+		if elapsed := time.Since(startedAt); elapsed < duration {
+			t.Fatalf("duration event elapsed after %v, want at least %v", elapsed, duration)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for duration event")
+	}
+
+	if got := writer.output.String(); got != "input before duration" {
+		t.Fatalf("stdout = %q, want %q", got, "input before duration")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunRejectsInvalidDurationWithoutReadingStdin(t *testing.T) {
+	for _, value := range []string{"", "not-a-duration", "1", "-1s", "-0s", "-0"} {
+		t.Run(value, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"duration:" + value}, unreadableReader{}, &stdout, &stderr)
+			if code != exitArgError {
+				t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitArgError, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "invalid duration") {
+				t.Fatalf("stderr = %q, want invalid-duration diagnostic", stderr.String())
 			}
 		})
 	}

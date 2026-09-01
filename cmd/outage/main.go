@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 const (
@@ -22,16 +23,19 @@ const helpText = `Usage: outage signal:USR1
        outage signal:USR2
        outage signal:SIGUSR2
        outage file:<path>
+       outage duration:<value>
 
 Copy stdin to stdout until the event is received. Receiving the event exits outage;
 it does not send a signal directly to the producer.
 Signal events are unsupported on Windows.
 File events exit when the specified path exists.
+Duration events use Go duration syntax and exit after the specified time has elapsed.
 
 Arguments:
   signal:USR1                Exit on USR1 (signal:SIGUSR1 is an alias).
   signal:USR2                Exit on USR2 (signal:SIGUSR2 is an alias).
   file:<path>                Exit when the specified path exists.
+  duration:<value>           Exit after the duration has elapsed.
 Options:
   --version                 Print the version (standalone).
   -h, --help                Show this help.
@@ -45,6 +49,8 @@ func main() {
 }
 
 func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
+	startedAt := time.Now()
+
 	for _, arg := range args {
 		if arg != "-h" && arg != "--help" {
 			continue
@@ -73,8 +79,33 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 
 	event := args[0]
 	var eventCh <-chan os.Signal
+	var durationCh <-chan time.Time
 	var stopEventMonitor func()
-	if strings.HasPrefix(event, "file:") {
+	if strings.HasPrefix(event, "duration:") {
+		duration, err := parseDurationEvent(event)
+		if err != nil {
+			writeDiagnostic(errOut, err)
+			return exitArgError
+		}
+		if duration == 0 {
+			return exitOK
+		}
+		remaining := duration - time.Since(startedAt)
+		if remaining <= 0 {
+			return exitOK
+		}
+		timer := time.NewTimer(remaining)
+		defer func() {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}()
+		durationCh = timer.C
+		ignoreSIGPIPE()
+	} else if strings.HasPrefix(event, "file:") {
 		path := strings.TrimPrefix(event, "file:")
 		if _, err := os.Lstat(path); err == nil {
 			return exitOK
@@ -87,7 +118,9 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 	} else {
 		eventCh, stopEventMonitor = installSignalMonitor(event)
 	}
-	defer stopEventMonitor()
+	if stopEventMonitor != nil {
+		defer stopEventMonitor()
+	}
 
 	copyDone := make(chan error, 1)
 	go func() {
@@ -97,6 +130,8 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 
 	select {
 	case <-eventCh:
+		return exitOK
+	case <-durationCh:
 		return exitOK
 	case err := <-copyDone:
 		if err != nil {
@@ -119,6 +154,10 @@ func validateArgs(args []string) error {
 	}
 
 	event := args[0]
+	if strings.HasPrefix(event, "duration:") {
+		_, err := parseDurationEvent(event)
+		return err
+	}
 	if strings.HasPrefix(event, "file:") {
 		if strings.TrimPrefix(event, "file:") == "" {
 			return fmt.Errorf("invalid file event %q", event)
@@ -135,6 +174,18 @@ func validateArgs(args []string) error {
 	}
 
 	return nil
+}
+
+func parseDurationEvent(event string) (time.Duration, error) {
+	value := strings.TrimPrefix(event, "duration:")
+	if strings.HasPrefix(value, "-") {
+		return 0, fmt.Errorf("invalid duration %q: duration must not be negative", event)
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q: %w", event, err)
+	}
+	return duration, nil
 }
 
 func writeDiagnostic(errOut io.Writer, err error) {
