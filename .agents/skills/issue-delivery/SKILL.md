@@ -24,15 +24,30 @@ repository's delegation rules. If the specification is ambiguous,
 contradictory, or offers multiple materially different choices, use `grilling`
 to expose every unresolved decision frontier and ask the user to choose. Do not
 update the Issue or begin implementation until the user confirms the resulting
-shared understanding. Updating an Issue requires explicit permission even after
-the specification is agreed.
+shared understanding.
 
-After shared understanding is confirmed, use `ponytail` to evaluate the
-smallest coherent implementation path before declaring readiness. Identify the
-existing mechanisms and tests to reuse, the minimum change surface, and any
-unnecessary abstraction or scope expansion. This is design analysis, not
-implementation authorization. Ponytail must not remove or weaken a confirmed
-requirement; report scope-out improvements separately.
+After the user explicitly confirms the shared understanding reached through
+`grilling`, use `domain-modeling` to reconcile the agreed vocabulary and
+boundaries with the repository context. If that reconciliation exposes a new
+ambiguity, contradiction, or material decision, return to `grilling` and obtain
+the user's confirmation before documenting it or continuing. Capture
+project-specific canonical terms and boundaries in the relevant `CONTEXT.md`
+only when they materially help implementation, and record a durable design
+decision in an ADR only when it is hard to reverse, surprising without context,
+and the result of a real trade-off. For a trivial change, keep the model in the
+working notes and avoid unnecessary CONTEXT/ADR churn. `domain-modeling`
+records the agreement; it does not replace user approval or authorize an
+Issue/specification mutation.
+
+If an Issue or specification mutation is proposed, show the exact proposed
+change and pause for explicit human approval before applying it. Updating an
+Issue requires that approval even after the specification is agreed. Once any
+approved mutation is applied (or when no mutation is needed), use `ponytail` to
+evaluate the smallest coherent implementation path before declaring readiness.
+Identify the existing mechanisms and tests to reuse, the minimum change
+surface, and any unnecessary abstraction or scope expansion. This is design
+analysis, not implementation authorization. Ponytail must not remove or weaken
+a confirmed requirement; report scope-out improvements separately.
 
 Implementation may start only when all of these are explicit and testable:
 
