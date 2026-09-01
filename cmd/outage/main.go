@@ -1,6 +1,7 @@
 package main
 
-// This file validates the event option and coordinates stream copying.
+// This file validates command-line options and coordinates version output
+// and stream copying.
 
 import (
 	"errors"
@@ -15,11 +16,22 @@ const (
 	exitArgError  = 2
 )
 
+var version = "dev"
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
+	if len(args) == 1 && args[0] == "--version" {
+		ignoreSIGPIPE()
+		if _, err := fmt.Fprintf(out, "outage %s\n", version); err != nil {
+			writeDiagnostic(errOut, err)
+			return exitCopyError
+		}
+		return exitOK
+	}
+
 	if err := validateArgs(args); err != nil {
 		writeDiagnostic(errOut, err)
 		return exitArgError

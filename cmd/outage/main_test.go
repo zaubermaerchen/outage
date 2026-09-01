@@ -12,9 +12,14 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func buildOutage(t *testing.T) string {
+	return buildOutageWithVersion(t, "")
+}
+
+func buildOutageWithVersion(t *testing.T, value string) string {
 	t.Helper()
 
 	binaryName := "outage"
@@ -22,7 +27,12 @@ func buildOutage(t *testing.T) string {
 		binaryName += ".exe"
 	}
 	binary := filepath.Join(t.TempDir(), binaryName)
-	cmd := exec.Command("go", "build", "-o", binary, ".")
+	args := []string{"build", "-o", binary}
+	if value != "" {
+		args = append(args, "-ldflags", "-X main.version="+value)
+	}
+	args = append(args, ".")
+	cmd := exec.Command("go", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build failed: %v\n%s", err, output)
@@ -55,6 +65,154 @@ func runOutage(t *testing.T, binary string, args []string, stdin io.Reader) comm
 		code = exitErr.ExitCode()
 	}
 	return commandResult{stdout: stdout.Bytes(), stderr: stderr.Bytes(), code: code}
+}
+
+func TestProcessPrintsVersion(t *testing.T) {
+	tests := []struct {
+		name        string
+		version     string
+		wantVersion string
+	}{
+		{name: "default", wantVersion: "dev"},
+		{name: "injected", version: "v0.1.0", wantVersion: "v0.1.0"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			binary := buildOutageWithVersion(t, tc.version)
+			result := runOutage(t, binary, []string{"--version"}, nil)
+
+			if result.code != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr = %q", result.code, result.stderr)
+			}
+			if string(result.stdout) != "outage "+tc.wantVersion+"\n" {
+				t.Fatalf("stdout = %q, want %q", result.stdout, "outage "+tc.wantVersion+"\n")
+			}
+			if len(result.stderr) != 0 {
+				t.Fatalf("stderr = %q, want empty", result.stderr)
+			}
+		})
+	}
+}
+
+func TestProcessReportsVersionOutputClosure(t *testing.T) {
+	binary := buildOutage(t)
+	cmd := exec.Command(binary, "--version")
+	stdoutRead, stdoutWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stdoutRead.Close(); err != nil {
+		_ = stdoutWrite.Close()
+		t.Fatal(err)
+	}
+	cmd.Stdout = stdoutWrite
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		_ = stdoutWrite.Close()
+		t.Fatal(err)
+	}
+	if err := stdoutWrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+	select {
+	case waitErr := <-waitDone:
+		var exitErr *exec.ExitError
+		if !errors.As(waitErr, &exitErr) {
+			t.Fatalf("wait error = %v, want exit status 1; stderr = %q", waitErr, stderr.Bytes())
+		}
+		if exitErr.ExitCode() != 1 {
+			t.Fatalf("exit code = %d, want 1; stderr = %q", exitErr.ExitCode(), stderr.Bytes())
+		}
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-waitDone
+		t.Fatal("timed out waiting for version command after stdout closure")
+	}
+	if stderr.Len() == 0 {
+		t.Fatal("stderr is empty, want output-write diagnostic")
+	}
+}
+
+type unreadableReader struct{}
+
+func (unreadableReader) Read([]byte) (int, error) {
+	return 0, errors.New("stdin must not be read")
+}
+
+func TestRunPrintsVersionWithoutReadingStdin(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--version"}, unreadableReader{}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if stdout.String() != "outage dev\n" {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), "outage dev\n")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunReportsVersionWriteError(t *testing.T) {
+	var stderr bytes.Buffer
+	wantErr := errors.New("write failed")
+	code := run([]string{"--version"}, strings.NewReader("input"), failingWriter{err: wantErr}, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), wantErr.Error()) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), wantErr)
+	}
+}
+
+func TestProcessExitsWithOpenStdinForVersion(t *testing.T) {
+	binary := buildOutage(t)
+	cmd := exec.Command(binary, "--version")
+	stdinRead, stdinWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdinWrite.Close()
+	cmd.Stdin = stdinRead
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		_ = stdinRead.Close()
+		t.Fatal(err)
+	}
+	_ = stdinRead.Close()
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("wait failed: %v; stdout = %q, stderr = %q", err, stdout.Bytes(), stderr.Bytes())
+		}
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-waitDone
+		t.Fatal("timed out waiting for version command with open stdin")
+	}
+
+	if stdout.String() != "outage dev\n" {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), "outage dev\n")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
 }
 
 func TestProcessPassesThroughBinaryInput(t *testing.T) {
@@ -118,7 +276,15 @@ func TestProcessRejectsInvalidArgumentsWithoutReadingStdin(t *testing.T) {
 		{name: "case-sensitive value", args: []string{"--event", "signal:usr1"}},
 		{name: "duplicate event", args: []string{"--event", "signal:USR1", "--event", "signal:SIGUSR1"}},
 		{name: "unknown option", args: []string{"--wat"}},
+		{name: "short version alias", args: []string{"-v"}},
 		{name: "positional argument", args: []string{"input"}},
+		{name: "version with event", args: []string{"--version", "--event", "signal:USR1"}},
+		{name: "event with version", args: []string{"--event", "signal:USR1", "--version"}},
+		{name: "version with unknown option", args: []string{"--version", "--wat"}},
+		{name: "unknown option with version", args: []string{"--wat", "--version"}},
+		{name: "version with positional argument", args: []string{"--version", "input"}},
+		{name: "positional argument with version", args: []string{"input", "--version"}},
+		{name: "repeated version", args: []string{"--version", "--version"}},
 	}
 
 	for _, tc := range cases {
