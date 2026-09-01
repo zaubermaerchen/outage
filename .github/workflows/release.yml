@@ -156,7 +156,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - name: Download release archives
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: release-*
           path: dist
@@ -172,7 +172,7 @@ jobs:
           sha256sum "${archives[@]}" > SHA256SUMS
           sha256sum --check SHA256SUMS
 
-      - name: Create or reuse GitHub release and publish assets
+      - name: Create GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -182,12 +182,8 @@ jobs:
           cd dist
           mapfile -t archives < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | LC_ALL=C sort)
           test "${#archives[@]}" -eq 6
-          if ! gh release view "$VERSION" >/dev/null 2>&1; then
-            gh release create "$VERSION" \
-              --verify-tag \
-              --draft \
-              --title "$VERSION" \
-              --notes "Release $VERSION."
-          fi
-          gh release upload "$VERSION" "${archives[@]}" SHA256SUMS --clobber
-          gh release edit "$VERSION" --draft=false
+          gh release create "$VERSION" \
+            --verify-tag \
+            --title "$VERSION" \
+            --notes "Release $VERSION." \
+            "${archives[@]}" SHA256SUMS
