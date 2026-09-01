@@ -14,11 +14,14 @@ func signalEventSupported() bool {
 	return true
 }
 
+// ignoreSIGPIPE makes closed output pipes report EPIPE to Go writes.
+func ignoreSIGPIPE() {
+	signal.Ignore(syscall.SIGPIPE)
+}
+
 func installSignalMonitor() (<-chan os.Signal, func()) {
 	signals := make(chan os.Signal, 1)
-	// Catch SIGPIPE so a closed stdout pipe is reported by os.File.Write as EPIPE
-	// instead of terminating the process before the copy can report the error.
-	signal.Ignore(syscall.SIGPIPE)
+	ignoreSIGPIPE()
 	signal.Notify(signals, syscall.SIGUSR1)
 	return signals, func() {
 		signal.Stop(signals)
