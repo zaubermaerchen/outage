@@ -16,6 +16,20 @@ const (
 	exitArgError  = 2
 )
 
+const helpText = `Usage: outage --event signal:USR1
+       outage --event signal:SIGUSR1
+
+Copy stdin to stdout until the event is received. Receiving the event exits outage;
+it does not send a signal directly to the producer.
+Signal events are unsupported on Windows.
+
+Options:
+  --event signal:USR1       Exit on USR1 (signal:SIGUSR1 is an alias).
+  --version                 Print the version (standalone).
+  -h, --help                Show this help.
+Help options take priority over every other argument.
+`
+
 var version = "dev"
 
 func main() {
@@ -23,6 +37,18 @@ func main() {
 }
 
 func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
+	for _, arg := range args {
+		if arg != "-h" && arg != "--help" {
+			continue
+		}
+		ignoreSIGPIPE()
+		if _, err := fmt.Fprint(out, helpText); err != nil {
+			writeDiagnostic(errOut, err)
+			return exitCopyError
+		}
+		return exitOK
+	}
+
 	if len(args) == 1 && args[0] == "--version" {
 		ignoreSIGPIPE()
 		if _, err := fmt.Fprintf(out, "outage %s\n", version); err != nil {
