@@ -1,0 +1,189 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./...
+
+      - name: Vet
+        shell: bash
+        run: |
+          set -euo pipefail
+          go vet ./...
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive_format: tar.gz
+            binary_suffix: ''
+          - goos: linux
+            goarch: arm64
+            archive_format: tar.gz
+            binary_suffix: ''
+          - goos: darwin
+            goarch: amd64
+            archive_format: tar.gz
+            binary_suffix: ''
+          - goos: darwin
+            goarch: arm64
+            archive_format: tar.gz
+            binary_suffix: ''
+          - goos: windows
+            goarch: amd64
+            archive_format: zip
+            binary_suffix: .exe
+          - goos: windows
+            goarch: arm64
+            archive_format: zip
+            binary_suffix: .exe
+    runs-on: ubuntu-latest
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: '0'
+      VERSION: ${{ github.ref_name }}
+      ARCHIVE_FORMAT: ${{ matrix.archive_format }}
+      BINARY_SUFFIX: ${{ matrix.binary_suffix }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build, package, and validate archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^v[A-Za-z0-9._-]+$ ]]; then
+            printf 'unsafe release tag: %s\n' "$VERSION" >&2
+            exit 1
+          fi
+
+          build_dir="build"
+          release_dir="release"
+          staging_root="staging"
+          binary_path="${build_dir}/outage${BINARY_SUFFIX}"
+          archive_name="outage-${VERSION}-${GOOS}-${GOARCH}.${ARCHIVE_FORMAT}"
+          archive_path="${release_dir}/${archive_name}"
+          package_dir="outage-${VERSION}-${GOOS}-${GOARCH}"
+          package_root="${staging_root}/${package_dir}"
+
+          mkdir -p "$build_dir" "$release_dir" "$package_root"
+          go build -trimpath -ldflags "-X main.version=${VERSION}" \
+            -o "$binary_path" ./cmd/outage
+          test -s "$binary_path"
+
+          if [[ "$GOOS" == "linux" && "$GOARCH" == "amd64" ]]; then
+            expected_version="${staging_root}/expected-version"
+            actual_version="${staging_root}/actual-version"
+            printf 'outage %s\n' "$VERSION" > "$expected_version"
+            "$binary_path" --version > "$actual_version"
+            cmp -s "$expected_version" "$actual_version"
+          fi
+
+          cp "$binary_path" "$package_root/outage${BINARY_SUFFIX}"
+          cp LICENSE README.md "$package_root/"
+
+          if [[ "$ARCHIVE_FORMAT" == "tar.gz" ]]; then
+            tar -czf "$archive_path" -C "$staging_root" "$package_dir"
+          else
+            (cd "$staging_root" && zip -q -r "$GITHUB_WORKSPACE/$archive_path" "$package_dir")
+          fi
+          test -s "$archive_path"
+
+          expected_entries="${staging_root}/expected-entries"
+          actual_entries="${staging_root}/actual-entries"
+          printf '%s\n' \
+            "${package_dir}/" \
+            "${package_dir}/outage${BINARY_SUFFIX}" \
+            "${package_dir}/LICENSE" \
+            "${package_dir}/README.md" | LC_ALL=C sort > "$expected_entries"
+
+          if [[ "$ARCHIVE_FORMAT" == "tar.gz" ]]; then
+            tar -tzf "$archive_path" | LC_ALL=C sort > "$actual_entries"
+          else
+            unzip -Z1 "$archive_path" | LC_ALL=C sort > "$actual_entries"
+          fi
+          cmp -s "$expected_entries" "$actual_entries"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release/outage-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate and verify checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          mapfile -t archives < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | LC_ALL=C sort)
+          test "${#archives[@]}" -eq 6
+          sha256sum "${archives[@]}" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          mapfile -t archives < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | LC_ALL=C sort)
+          test "${#archives[@]}" -eq 6
+          gh release create "$VERSION" \
+            --verify-tag \
+            --title "$VERSION" \
+            --notes "Release $VERSION." \
+            "${archives[@]}" SHA256SUMS
