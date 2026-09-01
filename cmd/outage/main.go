@@ -1,6 +1,6 @@
 package main
 
-// This file validates command-line options and coordinates version output
+// This file validates command-line arguments and coordinates version output
 // and stream copying.
 
 import (
@@ -16,15 +16,16 @@ const (
 	exitArgError  = 2
 )
 
-const helpText = `Usage: outage --event signal:USR1
-       outage --event signal:SIGUSR1
+const helpText = `Usage: outage signal:USR1
+       outage signal:SIGUSR1
 
 Copy stdin to stdout until the event is received. Receiving the event exits outage;
 it does not send a signal directly to the producer.
 Signal events are unsupported on Windows.
 
+Arguments:
+  signal:USR1                Exit on USR1 (signal:SIGUSR1 is an alias).
 Options:
-  --event signal:USR1       Exit on USR1 (signal:SIGUSR1 is an alias).
   --version                 Print the version (standalone).
   -h, --help                Show this help.
 Help options take priority over every other argument.
@@ -86,29 +87,18 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 
 func validateArgs(args []string) error {
 	if len(args) == 0 {
-		return errors.New("missing --event argument")
+		return errors.New("missing event argument")
+	}
+	if len(args) > 1 {
+		return fmt.Errorf("unexpected argument %q", args[1])
 	}
 
-	seenEvent := false
-	for i := 0; i < len(args); i++ {
-		if args[i] != "--event" {
-			return fmt.Errorf("unexpected argument %q", args[i])
-		}
-		if seenEvent {
-			return errors.New("duplicate --event argument")
-		}
-		seenEvent = true
-
-		if i+1 >= len(args) {
-			return errors.New("missing value for --event")
-		}
-		i++
-		if args[i] != "signal:USR1" && args[i] != "signal:SIGUSR1" {
-			return fmt.Errorf("unsupported event %q", args[i])
-		}
-		if !signalEventSupported() {
-			return fmt.Errorf("unsupported event %q on this platform", args[i])
-		}
+	event := args[0]
+	if event != "signal:USR1" && event != "signal:SIGUSR1" {
+		return fmt.Errorf("unsupported event %q", event)
+	}
+	if !signalEventSupported() {
+		return fmt.Errorf("unsupported event %q on this platform", event)
 	}
 
 	return nil

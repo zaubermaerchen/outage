@@ -182,8 +182,10 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"Usage: outage --event signal:USR1",
+		"Usage: outage signal:USR1",
 		"signal:SIGUSR1",
+		"Arguments:",
+		"Options:",
 		"-h, --help",
 		"--version",
 		"Help options take priority",
@@ -195,19 +197,22 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 			t.Errorf("help = %q, want substring %q", stdout.String(), want)
 		}
 	}
+	if strings.Contains(stdout.String(), "--event") {
+		t.Fatalf("help = %q, must not document removed --event option", stdout.String())
+	}
 }
 
 func TestRunHelpHasPriorityOverEveryOtherArgument(t *testing.T) {
 	cases := [][]string{
 		{"--help", "--version"},
 		{"--version", "--help"},
-		{"--event", "signal:USR1", "--help"},
-		{"--help", "--event", "signal:USR1"},
+		{"signal:USR1", "--help"},
+		{"--help", "signal:USR1"},
 		{"--wat", "--help"},
 		{"--help", "--wat"},
 		{"--event", "--help"},
 		{"-h", "--help", "--help"},
-		{"--event", "signal:TERM", "-h"},
+		{"signal:TERM", "-h"},
 	}
 
 	var want []byte
@@ -322,7 +327,7 @@ func TestRunWithoutHelpPreservesEventPassthrough(t *testing.T) {
 
 	input := []byte("input without help")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--event", "signal:USR1"}, bytes.NewReader(input), &stdout, &stderr)
+	code := run([]string{"signal:USR1"}, bytes.NewReader(input), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
 	}
@@ -393,7 +398,7 @@ func TestProcessPassesThroughBinaryInput(t *testing.T) {
 	input := []byte{0, 1, 2, 3, 0xff, '\n', 0}
 
 	for _, event := range []string{"signal:USR1", "signal:SIGUSR1"} {
-		result := runOutage(t, binary, []string{"--event", event}, bytes.NewReader(input))
+		result := runOutage(t, binary, []string{event}, bytes.NewReader(input))
 		if runtime.GOOS == "windows" {
 			if result.code != 2 {
 				t.Fatalf("event %q: exit code = %d, want 2; stderr = %q", event, result.code, result.stderr)
@@ -420,7 +425,7 @@ func TestProcessPassesThroughBinaryInput(t *testing.T) {
 
 func TestProcessPassesThroughEmptyInput(t *testing.T) {
 	binary := buildOutage(t)
-	result := runOutage(t, binary, []string{"--event", "signal:USR1"}, strings.NewReader(""))
+	result := runOutage(t, binary, []string{"signal:USR1"}, strings.NewReader(""))
 
 	wantCode := 0
 	if runtime.GOOS == "windows" {
@@ -444,15 +449,15 @@ func TestProcessRejectsInvalidArgumentsWithoutReadingStdin(t *testing.T) {
 		args []string
 	}{
 		{name: "missing event", args: nil},
-		{name: "missing value", args: []string{"--event"}},
-		{name: "unsupported value", args: []string{"--event", "signal:TERM"}},
-		{name: "case-sensitive value", args: []string{"--event", "signal:usr1"}},
-		{name: "duplicate event", args: []string{"--event", "signal:USR1", "--event", "signal:SIGUSR1"}},
+		{name: "removed event option", args: []string{"--event", "signal:USR1"}},
+		{name: "unsupported value", args: []string{"signal:TERM"}},
+		{name: "case-sensitive value", args: []string{"signal:usr1"}},
+		{name: "extra event", args: []string{"signal:USR1", "signal:SIGUSR1"}},
 		{name: "unknown option", args: []string{"--wat"}},
 		{name: "short version alias", args: []string{"-v"}},
 		{name: "positional argument", args: []string{"input"}},
-		{name: "version with event", args: []string{"--version", "--event", "signal:USR1"}},
-		{name: "event with version", args: []string{"--event", "signal:USR1", "--version"}},
+		{name: "version with event", args: []string{"--version", "signal:USR1"}},
+		{name: "event with version", args: []string{"signal:USR1", "--version"}},
 		{name: "version with unknown option", args: []string{"--version", "--wat"}},
 		{name: "unknown option with version", args: []string{"--wat", "--version"}},
 		{name: "version with positional argument", args: []string{"--version", "input"}},
@@ -512,7 +517,7 @@ func TestWindowsRejectsSignalEventsWithoutReadingStdin(t *testing.T) {
 			}
 			defer input.Close()
 
-			result := runOutage(t, binary, []string{"--event", event}, input)
+			result := runOutage(t, binary, []string{event}, input)
 			if result.code != 2 {
 				t.Fatalf("exit code = %d, want 2; stdout = %q, stderr = %q", result.code, result.stdout, result.stderr)
 			}
@@ -548,7 +553,7 @@ func TestRunReportsReadError(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	wantErr := errors.New("read failed")
-	code := run([]string{"--event", "signal:USR1"}, failingReader{err: wantErr}, &stdout, &stderr)
+	code := run([]string{"signal:USR1"}, failingReader{err: wantErr}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -567,7 +572,7 @@ func TestRunReportsWriteError(t *testing.T) {
 
 	var stderr bytes.Buffer
 	wantErr := errors.New("write failed")
-	code := run([]string{"--event", "signal:SIGUSR1"}, strings.NewReader("input"), failingWriter{err: wantErr}, &stderr)
+	code := run([]string{"signal:SIGUSR1"}, strings.NewReader("input"), failingWriter{err: wantErr}, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
