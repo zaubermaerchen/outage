@@ -19,6 +19,8 @@ const (
 
 const helpText = `Usage: outage signal:USR1
        outage signal:SIGUSR1
+       outage signal:USR2
+       outage signal:SIGUSR2
 
 Copy stdin to stdout until the event is received. Receiving the event exits outage;
 it does not send a signal directly to the producer.
@@ -26,6 +28,7 @@ Signal events are unsupported on Windows.
 
 Arguments:
   signal:USR1                Exit on USR1 (signal:SIGUSR1 is an alias).
+  signal:USR2                Exit on USR2 (signal:SIGUSR2 is an alias).
 Options:
   --version                 Print the version (standalone).
   -h, --help                Show this help.
@@ -65,7 +68,7 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 		return exitArgError
 	}
 
-	signalCh, stopSignalMonitor := installSignalMonitor()
+	signalCh, stopSignalMonitor := installSignalMonitor(args[0])
 	defer stopSignalMonitor()
 
 	copyDone := make(chan error, 1)
@@ -98,7 +101,8 @@ func validateArgs(args []string) error {
 	}
 
 	event := args[0]
-	if event != "signal:USR1" && event != "signal:SIGUSR1" {
+	if event != "signal:USR1" && event != "signal:SIGUSR1" &&
+		event != "signal:USR2" && event != "signal:SIGUSR2" {
 		return fmt.Errorf("unsupported event %q", event)
 	}
 	if !signalEventSupported() {

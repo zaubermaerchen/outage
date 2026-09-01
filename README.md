@@ -4,7 +4,7 @@
 
 `outage` forwards a byte stream until an external event tells it to exit. Put it
 between a producer and consumer when the middle process should stop promptly on
-USR1 and let the resulting pipe closure propagate naturally upstream.
+USR1 or USR2 and let the resulting pipe closure propagate naturally upstream.
 
 ## Usage
 
@@ -16,6 +16,14 @@ producer | outage signal:USR1 | consumer
 
 ```sh
 producer | outage signal:SIGUSR1 | consumer
+```
+
+USR2 is also supported, with `signal:SIGUSR2` as its equivalent, case-sensitive
+alias:
+
+```sh
+producer | outage signal:USR2 | consumer
+producer | outage signal:SIGUSR2 | consumer
 ```
 
 Normal forwarding:
@@ -38,6 +46,7 @@ forwarded.
 
 On USR1, `outage` itself exits with status 0 without waiting for EOF or draining
 the remaining stdin. Delivery of data still in flight is not guaranteed.
+USR2 has the same termination semantics.
 Diagnostics are written to stderr. Stdin or stdout I/O errors exit with status
 1; invalid normal-operation arguments exit with status 2.
 
@@ -51,16 +60,18 @@ and the producer. Stopping the producer itself is not guaranteed.
 ## Command-line interface
 
 - Normal operation requires exactly one positional event specification. v0.1.0
-  supports `signal:USR1` and its case-sensitive `signal:SIGUSR1` alias.
+  supports `signal:USR1` and `signal:USR2`, plus their case-sensitive
+  `signal:SIGUSR1` and `signal:SIGUSR2` aliases.
 - `-h` and `--help` display help. A help token has highest priority wherever it
   appears in the argument list, even alongside invalid arguments or `--version`.
 - Standalone `--version` prints the version.
 
 ## Platform support
 
-USR1 events are supported on the Unix systems covered by the implementation,
-including Linux and macOS. Windows builds support help and version output, but
-reject signal events as unsupported and provide no alternative event.
+USR1 and USR2 events are supported on the Unix systems covered by the
+implementation, including Linux and macOS. Windows builds support help and
+version output, but reject signal events as unsupported and provide no
+alternative event.
 
 ## Release builds
 

@@ -184,6 +184,8 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 	for _, want := range []string{
 		"Usage: outage signal:USR1",
 		"signal:SIGUSR1",
+		"outage signal:USR2",
+		"signal:SIGUSR2",
 		"Arguments:",
 		"Options:",
 		"-h, --help",
@@ -397,7 +399,12 @@ func TestProcessPassesThroughBinaryInput(t *testing.T) {
 	binary := buildOutage(t)
 	input := []byte{0, 1, 2, 3, 0xff, '\n', 0}
 
-	for _, event := range []string{"signal:USR1", "signal:SIGUSR1"} {
+	for _, event := range []string{
+		"signal:USR1",
+		"signal:SIGUSR1",
+		"signal:USR2",
+		"signal:SIGUSR2",
+	} {
 		result := runOutage(t, binary, []string{event}, bytes.NewReader(input))
 		if runtime.GOOS == "windows" {
 			if result.code != 2 {
@@ -454,6 +461,7 @@ func TestProcessRejectsInvalidArgumentsWithoutReadingStdin(t *testing.T) {
 		{name: "removed event option form", args: []string{"--event", "signal:USR1"}, wantDiagnostic: "--event"},
 		{name: "unsupported value", args: []string{"signal:TERM"}},
 		{name: "case-sensitive value", args: []string{"signal:usr1"}},
+		{name: "case-sensitive USR2 value", args: []string{"signal:usr2"}},
 		{name: "extra event", args: []string{"signal:USR1", "signal:SIGUSR1"}},
 		{name: "unknown option", args: []string{"--wat"}},
 		{name: "short version alias", args: []string{"-v"}},
@@ -510,7 +518,12 @@ func TestWindowsRejectsSignalEventsWithoutReadingStdin(t *testing.T) {
 	}
 
 	binary := buildOutage(t)
-	for _, event := range []string{"signal:USR1", "signal:SIGUSR1"} {
+	for _, event := range []string{
+		"signal:USR1",
+		"signal:SIGUSR1",
+		"signal:USR2",
+		"signal:SIGUSR2",
+	} {
 		t.Run(event, func(t *testing.T) {
 			inputPath := filepath.Join(t.TempDir(), "input")
 			if err := os.WriteFile(inputPath, []byte("must not be read"), 0o600); err != nil {
