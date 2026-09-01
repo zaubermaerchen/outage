@@ -96,8 +96,18 @@ func TestProcessPrintsVersion(t *testing.T) {
 }
 
 func TestProcessReportsVersionOutputClosure(t *testing.T) {
+	testProcessReportsOutputClosure(t, []string{"--version"})
+}
+
+func TestProcessReportsHelpOutputClosure(t *testing.T) {
+	testProcessReportsOutputClosure(t, []string{"--help"})
+}
+
+func testProcessReportsOutputClosure(t *testing.T, args []string) {
+	t.Helper()
+
 	binary := buildOutage(t)
-	cmd := exec.Command(binary, "--version")
+	cmd := exec.Command(binary, args...)
 	stdoutRead, stdoutWrite, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -125,10 +135,10 @@ func TestProcessReportsVersionOutputClosure(t *testing.T) {
 	case waitErr := <-waitDone:
 		var exitErr *exec.ExitError
 		if !errors.As(waitErr, &exitErr) {
-			t.Fatalf("wait error = %v, want exit status 1; stderr = %q", waitErr, stderr.Bytes())
+			t.Fatalf("args %v: wait error = %v, want exit status 1; stderr = %q", args, waitErr, stderr.Bytes())
 		}
 		if exitErr.ExitCode() != 1 {
-			t.Fatalf("exit code = %d, want 1; stderr = %q", exitErr.ExitCode(), stderr.Bytes())
+			t.Fatalf("args %v: exit code = %d, want 1; stderr = %q", args, exitErr.ExitCode(), stderr.Bytes())
 		}
 	case <-time.After(5 * time.Second):
 		_ = cmd.Process.Kill()
@@ -136,7 +146,138 @@ func TestProcessReportsVersionOutputClosure(t *testing.T) {
 		t.Fatal("timed out waiting for version command after stdout closure")
 	}
 	if stderr.Len() == 0 {
-		t.Fatal("stderr is empty, want output-write diagnostic")
+		t.Fatalf("args %v: stderr is empty, want output-write diagnostic", args)
+	}
+}
+
+func TestRunHelpAliasesAreIdentical(t *testing.T) {
+	var outputs [2][]byte
+	for i, arg := range []string{"-h", "--help"} {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{arg}, unreadableReader{}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("args %q: exit code = %d, want 0; stderr = %q", arg, code, stderr.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("args %q: stderr = %q, want empty", arg, stderr.String())
+		}
+		if !bytes.HasSuffix(stdout.Bytes(), []byte{'\n'}) {
+			t.Fatalf("args %q: stdout = %q, want trailing newline", arg, stdout.String())
+		}
+		outputs[i] = stdout.Bytes()
+	}
+	if !bytes.Equal(outputs[0], outputs[1]) {
+		t.Fatalf("short help = %q, long help = %q; want identical output", outputs[0], outputs[1])
+	}
+}
+
+func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--help"}, unreadableReader{}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	for _, want := range []string{
+		"Usage: outage --event signal:USR1",
+		"signal:SIGUSR1",
+		"-h, --help",
+		"--version",
+		"Help options take priority",
+		"exits outage",
+		"signal directly to the producer",
+		"unsupported on Windows",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("help = %q, want substring %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestRunHelpHasPriorityOverEveryOtherArgument(t *testing.T) {
+	cases := [][]string{
+		{"--help", "--version"},
+		{"--version", "--help"},
+		{"--event", "signal:USR1", "--help"},
+		{"--help", "--event", "signal:USR1"},
+		{"--wat", "--help"},
+		{"--help", "--wat"},
+		{"--event", "--help"},
+		{"-h", "--help", "--help"},
+		{"--event", "signal:TERM", "-h"},
+	}
+
+	var want []byte
+	for i, args := range cases {
+		var stdout, stderr bytes.Buffer
+		code := run(args, unreadableReader{}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("args %q: exit code = %d, want 0; stderr = %q", args, code, stderr.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("args %q: stderr = %q, want empty", args, stderr.String())
+		}
+		if i == 0 {
+			want = append([]byte(nil), stdout.Bytes()...)
+		}
+		if !bytes.Equal(stdout.Bytes(), want) {
+			t.Fatalf("args %q: stdout differs from help output", args)
+		}
+	}
+}
+
+func TestProcessExitsWithOpenStdinForHelp(t *testing.T) {
+	binary := buildOutage(t)
+	cmd := exec.Command(binary, "--help")
+	stdinRead, stdinWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdinWrite.Close()
+	cmd.Stdin = stdinRead
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		_ = stdinRead.Close()
+		t.Fatal(err)
+	}
+	_ = stdinRead.Close()
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+	waited := false
+	t.Cleanup(func() {
+		_ = stdinRead.Close()
+		if waited {
+			return
+		}
+		_ = cmd.Process.Kill()
+		<-waitDone
+	})
+
+	select {
+	case waitErr := <-waitDone:
+		waited = true
+		if waitErr != nil {
+			t.Fatalf("wait failed: %v; stdout = %q, stderr = %q", waitErr, stdout.Bytes(), stderr.Bytes())
+		}
+		if stdout.String() != string(helpText) {
+			t.Fatalf("stdout = %q, want %q", stdout.String(), helpText)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q, want empty", stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		killErr := cmd.Process.Kill()
+		waitErr := <-waitDone
+		waited = true
+		t.Fatalf("timed out waiting for help command with open stdin (kill error: %v, wait error: %v)", killErr, waitErr)
 	}
 }
 
@@ -155,6 +296,38 @@ func TestRunPrintsVersionWithoutReadingStdin(t *testing.T) {
 	}
 	if stdout.String() != "outage dev\n" {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), "outage dev\n")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunReportsHelpWriteError(t *testing.T) {
+	var stderr bytes.Buffer
+	wantErr := errors.New("write failed")
+	code := run([]string{"--help"}, unreadableReader{}, failingWriter{err: wantErr}, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), wantErr.Error()) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), wantErr)
+	}
+}
+
+func TestRunWithoutHelpPreservesEventPassthrough(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signal event is unsupported on Windows")
+	}
+
+	input := []byte("input without help")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--event", "signal:USR1"}, bytes.NewReader(input), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if !bytes.Equal(stdout.Bytes(), input) {
+		t.Fatalf("stdout = %q, want %q", stdout.Bytes(), input)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
