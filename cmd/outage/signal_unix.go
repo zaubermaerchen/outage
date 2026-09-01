@@ -27,6 +27,8 @@ func installSignalMonitor(event string) (<-chan os.Signal, func()) {
 		signal.Notify(signals, syscall.SIGUSR1)
 	case "signal:USR2", "signal:SIGUSR2":
 		signal.Notify(signals, syscall.SIGUSR2)
+	default:
+		panic("unexpected signal event")
 	}
 	return signals, func() {
 		signal.Stop(signals)
