@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 const (
@@ -88,6 +89,9 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 func validateArgs(args []string) error {
 	if len(args) == 0 {
 		return errors.New("missing event argument")
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("unexpected argument %q", args[0])
 	}
 	if len(args) > 1 {
 		return fmt.Errorf("unexpected argument %q", args[1])

@@ -445,11 +445,13 @@ func TestProcessPassesThroughEmptyInput(t *testing.T) {
 func TestProcessRejectsInvalidArgumentsWithoutReadingStdin(t *testing.T) {
 	binary := buildOutage(t)
 	cases := []struct {
-		name string
-		args []string
+		name           string
+		args           []string
+		wantDiagnostic string
 	}{
 		{name: "missing event", args: nil},
-		{name: "removed event option", args: []string{"--event", "signal:USR1"}},
+		{name: "bare removed event option", args: []string{"--event"}, wantDiagnostic: "--event"},
+		{name: "removed event option form", args: []string{"--event", "signal:USR1"}, wantDiagnostic: "--event"},
 		{name: "unsupported value", args: []string{"signal:TERM"}},
 		{name: "case-sensitive value", args: []string{"signal:usr1"}},
 		{name: "extra event", args: []string{"signal:USR1", "signal:SIGUSR1"}},
@@ -487,6 +489,9 @@ func TestProcessRejectsInvalidArgumentsWithoutReadingStdin(t *testing.T) {
 			}
 			if len(result.stderr) == 0 {
 				t.Fatal("stderr is empty, want argument diagnostic")
+			}
+			if tc.wantDiagnostic != "" && !strings.Contains(string(result.stderr), tc.wantDiagnostic) {
+				t.Fatalf("stderr = %q, want diagnostic containing %q", result.stderr, tc.wantDiagnostic)
 			}
 			offset, err := input.Seek(0, io.SeekCurrent)
 			if err != nil {
