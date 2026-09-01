@@ -388,6 +388,19 @@ func TestRunFileEventExitsImmediatelyWhenPathExists(t *testing.T) {
 	}
 }
 
+func TestRunFileEventExitsImmediatelyWhenDanglingSymlinkExists(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated permissions on Windows")
+	}
+
+	path := filepath.Join(t.TempDir(), "trigger")
+	if err := os.Symlink("missing-target", path); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	assertExistingFileEventExits(t, path)
+}
+
 func TestRunFileEventPreservesRelativePath(t *testing.T) {
 	dir, err := os.MkdirTemp(".", "outage-file-event-")
 	if err != nil {
@@ -526,6 +539,90 @@ func TestRunFileEventWaitsAndForwardsUntilPathAppears(t *testing.T) {
 	}
 }
 
+func TestRunFileEventExitsWhenDanglingSymlinkAppears(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated permissions on Windows")
+	}
+
+	path := filepath.Join(t.TempDir(), "trigger")
+	reader := &fileEventReader{
+		payload: []byte("input before dangling symlink"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var stderr bytes.Buffer
+	result := make(chan int, 1)
+	readerStarted := false
+	finished := false
+	t.Cleanup(func() {
+		if readerStarted {
+			close(reader.release)
+			select {
+			case <-reader.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for blocked reader cleanup")
+			}
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for run cleanup")
+			}
+		}
+	})
+
+	go func() {
+		result <- run([]string{"file:" + path}, reader, writer, &stderr)
+	}()
+
+	select {
+	case <-reader.started:
+		readerStarted = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for file-event input reader to start")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for input to be forwarded")
+	}
+	select {
+	case code := <-result:
+		t.Fatalf("run exited before dangling symlink appeared with code %d", code)
+	default:
+	}
+
+	if err := os.Symlink("missing-target", path); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("path mode = %v, want symlink", info.Mode())
+	}
+
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for dangling symlink file event")
+	}
+	if got := writer.output.String(); got != "input before dangling symlink" {
+		t.Fatalf("stdout = %q, want %q", got, "input before dangling symlink")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
 func TestRunFileEventContinuesAfterTransientStatError(t *testing.T) {
 	root := t.TempDir()
 	parent := filepath.Join(root, "parent")
@@ -601,7 +698,7 @@ func TestRunFileEventContinuesAfterTransientStatError(t *testing.T) {
 		case code := <-result:
 			finished = true
 			t.Fatalf("run exited while parent was a regular file with code %d", code)
-		case <-time.After(2 * filePollInterval):
+		case <-time.After(filePollInterval):
 		}
 		info, err := os.Stat(parent)
 		if err != nil {

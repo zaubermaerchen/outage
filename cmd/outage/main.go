@@ -76,7 +76,7 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 	var stopEventMonitor func()
 	if strings.HasPrefix(event, "file:") {
 		path := strings.TrimPrefix(event, "file:")
-		if _, err := os.Stat(path); err == nil {
+		if _, err := os.Lstat(path); err == nil {
 			return exitOK
 		} else if !os.IsNotExist(err) {
 			writeDiagnostic(errOut, err)
