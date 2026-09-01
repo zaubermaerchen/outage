@@ -37,6 +37,19 @@ The file event triggers immediately when `/tmp/foo` already exists. Otherwise,
 existing path, including a directory, triggers the event; the path after the
 first `file:` prefix is passed through unchanged.
 
+To exit after a duration, use a positional duration event:
+
+```sh
+producer | outage duration:30s | consumer
+```
+
+The value follows Go's duration syntax, such as `500ms` or `1m30s`, and is
+measured from the start of the `outage` process. A zero duration exits
+immediately without reading stdin. While a positive duration is pending,
+`outage` forwards stdin to stdout; when it elapses, `outage` exits without
+waiting for EOF or draining the remaining input. Empty, malformed, and
+negative duration values are argument errors.
+
 Normal forwarding:
 
 ```text
@@ -74,7 +87,8 @@ and the producer. Stopping the producer itself is not guaranteed.
   supports `signal:USR1` and `signal:USR2`, plus their case-sensitive
   `signal:SIGUSR1` and `signal:SIGUSR2` aliases. `file:<path>` exits when the
   path exists, waiting and forwarding stdin to stdout if it is not present yet.
-  The path may be relative or absolute and may contain colons.
+  The path may be relative or absolute and may contain colons. `duration:<value>`
+  exits after the Go duration value elapses, measured from process start.
 - `-h` and `--help` display help. A help token has highest priority wherever it
   appears in the argument list, even alongside invalid arguments or `--version`.
 - Standalone `--version` prints the version.
@@ -83,8 +97,9 @@ and the producer. Stopping the producer itself is not guaranteed.
 
 USR1 and USR2 events are supported on the Unix systems covered by the
 implementation, including Linux and macOS. Windows builds support help and
-version output, and support portable polling for `file:<path>` events. Signal
-events remain unsupported on Windows.
+version output, portable polling for `file:<path>` events, and portable
+`duration:<value>` events on all target platforms. Signal events remain
+unsupported on Windows.
 
 ## Release builds
 
