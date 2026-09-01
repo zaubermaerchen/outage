@@ -27,7 +27,9 @@ producer ──bytes──> outage ──same bytes──> consumer
 After `outage` receives USR1:
 
 ```text
-producer ──bytes──> [closed pipe]   outage exits 0   consumer observes EOF
+producer ──later write──> [outage stdin endpoint closed]
+                         outage exits 0
+consumer <──EOF───────── [outage stdout endpoint closed]
 ```
 
 During normal operation, `outage` forwards stdin to stdout byte-for-byte. EOF,
