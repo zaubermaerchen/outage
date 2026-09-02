@@ -50,6 +50,22 @@ immediately without reading stdin. While a positive duration is pending,
 waiting for EOF or draining the remaining input. Empty, malformed, and
 negative duration values are argument errors.
 
+To exit at a local wall-clock time, use a positional datetime event:
+
+```sh
+producer | outage datetime:2026-09-03T18:00 | consumer
+```
+
+The accepted forms are `YYYY-MM-DDTHH:MM` and `YYYY-MM-DDTHH:MM:SS`; omitted
+seconds mean `00`. The value is interpreted in the local timezone captured when
+`outage` starts and is monitored immediately, without waiting for stdin. A
+datetime that has already been reached exits without reading stdin. Local times
+skipped by a daylight-saving transition are invalid; when a local time occurs
+twice, the earlier absolute occurrence is selected. Timezone suffixes,
+fractional seconds, and other formats are invalid. While a future datetime is
+pending, stdin is forwarded to stdout; when it is reached, `outage` exits
+without waiting for EOF or draining remaining input.
+
 Normal forwarding:
 
 ```text
@@ -89,6 +105,8 @@ and the producer. Stopping the producer itself is not guaranteed.
   path exists, waiting and forwarding stdin to stdout if it is not present yet.
   The path may be relative or absolute and may contain colons. `duration:<value>`
   exits after the Go duration value elapses, measured from process start.
+  `datetime:YYYY-MM-DDTHH:MM[:SS]` exits when the local wall clock reaches the
+  specified time, using the local timezone captured at startup.
 - `-h` and `--help` display help. A help token has highest priority wherever it
   appears in the argument list, even alongside invalid arguments or `--version`.
 - Standalone `--version` prints the version.
@@ -98,8 +116,8 @@ and the producer. Stopping the producer itself is not guaranteed.
 USR1 and USR2 events are supported on the Unix systems covered by the
 implementation, including Linux and macOS. Windows builds support help and
 version output, portable polling for `file:<path>` events, and portable
-`duration:<value>` events on all target platforms. Signal events remain
-unsupported on Windows.
+`duration:<value>` and `datetime:YYYY-MM-DDTHH:MM[:SS]` events on all target
+platforms. Signal events remain unsupported on Windows.
 
 ## Release builds
 
