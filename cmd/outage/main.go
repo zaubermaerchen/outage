@@ -24,18 +24,27 @@ const helpText = `Usage: outage signal:USR1
        outage signal:SIGUSR2
        outage file:<path>
        outage duration:<value>
+       outage datetime:YYYY-MM-DDTHH:MM
+       outage datetime:YYYY-MM-DDTHH:MM:SS
 
 Copy stdin to stdout until the event is received. Receiving the event exits outage;
 it does not send a signal directly to the producer.
 Signal events are unsupported on Windows.
 File events exit when the specified path exists.
 Duration events use Go duration syntax and exit after the specified time has elapsed.
+Datetime events use the process-local wall clock captured at startup and begin
+monitoring immediately. A datetime already reached exits without reading stdin;
+DST gaps and malformed, timezone-qualified, or fractional values are invalid.
+For an ambiguous DST overlap, the earlier absolute occurrence is selected.
 
 Arguments:
   signal:USR1                Exit on USR1 (signal:SIGUSR1 is an alias).
   signal:USR2                Exit on USR2 (signal:SIGUSR2 is an alias).
   file:<path>                Exit when the specified path exists.
   duration:<value>           Exit after the duration has elapsed.
+  datetime:YYYY-MM-DDTHH:MM[:SS]
+                             Exit when the local wall clock reaches the datetime
+                             (seconds may be omitted).
 Options:
   --version                 Print the version (standalone).
   -h, --help                Show this help.
@@ -49,7 +58,12 @@ func main() {
 }
 
 func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
-	startedAt := time.Now()
+	return runWithClock(args, in, out, errOut, defaultRuntimeClock())
+}
+
+func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, clock runtimeClock) int {
+	clock = clock.normalized()
+	startedAt := clock.now()
 
 	for _, arg := range args {
 		if arg != "-h" && arg != "--help" {
@@ -72,7 +86,7 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 		return exitOK
 	}
 
-	if err := validateArgs(args); err != nil {
+	if err := validateArgsAt(args, clock.location); err != nil {
 		writeDiagnostic(errOut, err)
 		return exitArgError
 	}
@@ -80,6 +94,7 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 	event := args[0]
 	var eventCh <-chan os.Signal
 	var durationCh <-chan time.Time
+	var datetimeCh <-chan time.Time
 	var stopEventMonitor func()
 	if strings.HasPrefix(event, "duration:") {
 		duration, err := parseDurationEvent(event)
@@ -90,20 +105,31 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 		if duration == 0 {
 			return exitOK
 		}
-		remaining := duration - time.Since(startedAt)
+		remaining := duration - clock.now().Sub(startedAt)
 		if remaining <= 0 {
 			return exitOK
 		}
-		timer := time.NewTimer(remaining)
-		defer func() {
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
+		durationCh, stopEventMonitor = clock.newTimer(remaining)
+		if durationCh == nil {
+			if stopEventMonitor != nil {
+				stopEventMonitor()
 			}
-		}()
-		durationCh = timer.C
+			return exitOK
+		}
+		ignoreSIGPIPE()
+	} else if strings.HasPrefix(event, "datetime:") {
+		deadline, err := parseDatetimeEvent(event, clock.location)
+		if err != nil {
+			writeDiagnostic(errOut, err)
+			return exitArgError
+		}
+		if !deadline.After(startedAt) {
+			return exitOK
+		}
+		datetimeCh, stopEventMonitor = startDeadlineMonitor(&deadline, clock.now, clock.newTimer)
+		if datetimeCh == nil {
+			return exitOK
+		}
 		ignoreSIGPIPE()
 	} else if strings.HasPrefix(event, "file:") {
 		path := strings.TrimPrefix(event, "file:")
@@ -133,6 +159,8 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 		return exitOK
 	case <-durationCh:
 		return exitOK
+	case <-datetimeCh:
+		return exitOK
 	case err := <-copyDone:
 		if err != nil {
 			writeDiagnostic(errOut, err)
@@ -143,6 +171,10 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 }
 
 func validateArgs(args []string) error {
+	return validateArgsAt(args, time.Local)
+}
+
+func validateArgsAt(args []string, location *time.Location) error {
 	if len(args) == 0 {
 		return errors.New("missing event argument")
 	}
@@ -156,6 +188,10 @@ func validateArgs(args []string) error {
 	event := args[0]
 	if strings.HasPrefix(event, "duration:") {
 		_, err := parseDurationEvent(event)
+		return err
+	}
+	if strings.HasPrefix(event, "datetime:") {
+		_, err := parseDatetimeEvent(event, location)
 		return err
 	}
 	if strings.HasPrefix(event, "file:") {

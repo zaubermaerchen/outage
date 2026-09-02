@@ -190,6 +190,9 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 		"file:<path>",
 		"outage duration:<value>",
 		"duration:<value>",
+		"outage datetime:YYYY-MM-DDTHH:MM",
+		"outage datetime:YYYY-MM-DDTHH:MM:SS",
+		"datetime:YYYY-MM-DDTHH:MM[:SS]",
 		"Arguments:",
 		"Options:",
 		"-h, --help",
@@ -198,6 +201,10 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 		"exits outage",
 		"signal directly to the producer",
 		"unsupported on Windows",
+		"captured at startup",
+		"without reading stdin",
+		"DST gaps",
+		"earlier absolute occurrence",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("help = %q, want substring %q", stdout.String(), want)
