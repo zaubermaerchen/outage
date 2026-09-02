@@ -124,5 +124,5 @@ platforms. Signal events remain unsupported on Windows.
 Inject the release version at build time with Go's linker flags:
 
 ```sh
-go build -ldflags "-X main.version=v0.2.0" ./cmd/outage
+go build -ldflags "-X main.version=v0.2.1" ./cmd/outage
 ```
