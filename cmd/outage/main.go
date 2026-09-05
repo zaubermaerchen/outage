@@ -207,14 +207,10 @@ func canonicalConditionIdentity(condition string, location *time.Location) (cond
 	if strings.HasPrefix(condition, "file:") {
 		return conditionIdentity{kind: "file", value: strings.TrimPrefix(condition, "file:")}, nil
 	}
-	switch condition {
-	case "signal:USR1", "signal:SIGUSR1":
-		return conditionIdentity{kind: "signal", value: "USR1"}, nil
-	case "signal:USR2", "signal:SIGUSR2":
-		return conditionIdentity{kind: "signal", value: "USR2"}, nil
-	default:
-		return conditionIdentity{kind: "signal", value: condition}, nil
+	if signal, ok := canonicalSignalName(condition); ok {
+		return conditionIdentity{kind: "signal", value: signal}, nil
 	}
+	return conditionIdentity{kind: "signal", value: condition}, nil
 }
 
 // installCondition preserves each event monitor's existing semantics while
@@ -312,6 +308,13 @@ func validateArgs(args []string) error {
 }
 
 func validateArgsAt(args []string, location *time.Location) error {
+	return validateArgsAtWithSignalSupport(args, location, signalEventSupported)
+}
+
+// validateArgsAtWithSignalSupport keeps syntax errors ahead of platform
+// capability errors. This ensures a malformed later member is diagnosed even
+// when an earlier signal is unsupported on the current platform.
+func validateArgsAtWithSignalSupport(args []string, location *time.Location, signalSupported func() bool) error {
 	if len(args) == 0 {
 		return errors.New("missing event argument")
 	}
@@ -323,15 +326,21 @@ func validateArgsAt(args []string, location *time.Location) error {
 	}
 
 	event := args[0]
-	for _, condition := range strings.Split(event, " && ") {
-		if err := validateConditionAt(condition, location); err != nil {
+	conditions := strings.Split(event, " && ")
+	for _, condition := range conditions {
+		if err := validateConditionSyntaxAt(condition, location); err != nil {
+			return err
+		}
+	}
+	for _, condition := range conditions {
+		if err := validateConditionCapabilityAt(condition, signalSupported); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateConditionAt(event string, location *time.Location) error {
+func validateConditionSyntaxAt(event string, location *time.Location) error {
 	if strings.HasPrefix(event, "duration:") {
 		_, err := parseDurationEvent(event)
 		return err
@@ -347,15 +356,41 @@ func validateConditionAt(event string, location *time.Location) error {
 		return nil
 	}
 
-	if event != "signal:USR1" && event != "signal:SIGUSR1" &&
-		event != "signal:USR2" && event != "signal:SIGUSR2" {
+	if !isSignalEvent(event) {
 		return fmt.Errorf("unsupported event %q", event)
 	}
-	if !signalEventSupported() {
+
+	return nil
+}
+
+func validateConditionCapabilityAt(event string, signalSupported func() bool) error {
+	if !isSignalEvent(event) {
+		return nil
+	}
+	if signalSupported == nil {
+		signalSupported = signalEventSupported
+	}
+	if !signalSupported() {
 		return fmt.Errorf("unsupported event %q on this platform", event)
 	}
 
 	return nil
+}
+
+func isSignalEvent(event string) bool {
+	_, ok := canonicalSignalName(event)
+	return ok
+}
+
+func canonicalSignalName(event string) (string, bool) {
+	switch event {
+	case "signal:USR1", "signal:SIGUSR1":
+		return "USR1", true
+	case "signal:USR2", "signal:SIGUSR2":
+		return "USR2", true
+	default:
+		return "", false
+	}
 }
 
 func parseDurationEvent(event string) (time.Duration, error) {

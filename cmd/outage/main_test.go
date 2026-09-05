@@ -499,6 +499,30 @@ func TestRunRejectsEmptyAndConditionMembersWithoutReadingStdin(t *testing.T) {
 	}
 }
 
+func TestValidateConditionsCheckAllSyntaxBeforePlatformCapability(t *testing.T) {
+	signalUnsupported := func() bool { return false }
+	for _, tc := range []struct {
+		name           string
+		event          string
+		wantDiagnostic string
+	}{
+		{name: "trailing empty member", event: "signal:USR1 && ", wantDiagnostic: `""`},
+		{name: "consecutive empty member", event: "signal:USR1 &&  && signal:USR2", wantDiagnostic: `""`},
+		{name: "first malformed member", event: "signal:TERM && signal:USR1", wantDiagnostic: `"signal:TERM"`},
+		{name: "capability checked after syntax", event: "signal:USR1 && signal:USR2", wantDiagnostic: `"signal:USR1"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateArgsAtWithSignalSupport([]string{tc.event}, time.UTC, signalUnsupported)
+			if err == nil {
+				t.Fatalf("validateArgsAtWithSignalSupport(%q) = nil, want error", tc.event)
+			}
+			if !strings.Contains(err.Error(), tc.wantDiagnostic) {
+				t.Fatalf("error = %q, want diagnostic containing %q", err, tc.wantDiagnostic)
+			}
+		})
+	}
+}
+
 func TestRunAndConditionsLatchSatisfiedMembersUntilAllArrive(t *testing.T) {
 	location := time.UTC
 	now := time.Date(2026, time.September, 3, 17, 0, 0, 0, location)
