@@ -26,6 +26,22 @@ producer | outage signal:USR2 | consumer
 producer | outage signal:SIGUSR2 | consumer
 ```
 
+Multiple conditions can be combined in one positional event specification with
+the exact separator ` && `:
+
+```sh
+producer | outage 'signal:USR1 && file:/tmp/foo' | consumer
+```
+
+Every condition must occur before `outage` exits. Once a condition occurs it is
+latched for the lifetime of the process, so the conditions do not need to occur
+simultaneously. The separator is the literal ASCII space-ampersand-ampersand-
+space sequence; operands are not trimmed. Quote the complete expression so the
+shell passes it as one positional argument. An expression containing a leading,
+trailing, or consecutive separator is invalid. Paths containing the exact
+separator cannot be represented, and only AND combinations are supported (not
+OR, parentheses, negation, or other expression syntax).
+
 To exit when a path exists, use a positional file event:
 
 ```sh
@@ -111,7 +127,9 @@ and the producer. Stopping the producer itself is not guaranteed.
   exits after the Go duration value elapses, measured from process start.
   `datetime:YYYY-MM-DDTHH:MM[:SS]` exits when the local wall clock reaches the
   specified time, using the local timezone captured at startup. RFC3339 values
-  with seconds and an explicit numeric offset or `Z` are also supported.
+  with seconds and an explicit numeric offset or `Z` are also supported. Any
+  of these conditions may be combined with the exact ` && ` separator; all
+  conditions are latched independently and must be satisfied before exit.
 - `-h` and `--help` display help. A help token has highest priority wherever it
   appears in the argument list, even alongside invalid arguments or `--version`.
 - Standalone `--version` prints the version.

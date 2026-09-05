@@ -205,6 +205,118 @@ func TestRunExitsOnUSR2WhileOutputIsBlocked(t *testing.T) {
 	}
 }
 
+func TestRunAndSignalConditionsLatchUntilBothSignalsArrive(t *testing.T) {
+	reader := &blockingReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	var stdout, stderr bytes.Buffer
+	result := make(chan int, 1)
+	finished := false
+	go func() {
+		result <- run([]string{"signal:USR1 && signal:USR2"}, reader, &stdout, &stderr)
+	}()
+
+	t.Cleanup(func() {
+		close(reader.release)
+		select {
+		case <-reader.done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for blocked reader cleanup")
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for AND signal run cleanup")
+			}
+		}
+	})
+
+	select {
+	case <-reader.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for AND signal input reader")
+	}
+	sendUSR1(t)
+	select {
+	case code := <-result:
+		t.Fatalf("run exited after one signal with code %d", code)
+	case <-time.After(100 * time.Millisecond):
+	}
+	sendUSR2(t)
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("run status = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for both AND signals")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunExitsAfterOneSignalForDuplicateEquivalentConditions(t *testing.T) {
+	reader := &blockingReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	var stdout, stderr bytes.Buffer
+	result := make(chan int, 1)
+	finished := false
+	go func() {
+		result <- run([]string{"signal:USR1 && signal:SIGUSR1"}, reader, &stdout, &stderr)
+	}()
+
+	t.Cleanup(func() {
+		close(reader.release)
+		select {
+		case <-reader.done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for blocked reader cleanup")
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for duplicate-signal run cleanup")
+			}
+		}
+	})
+
+	// The reader starts only after run has installed the condition monitors, so
+	// this handshake makes the signal delivery deterministic without sleeping.
+	select {
+	case <-reader.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for duplicate-signal monitors")
+	}
+	sendUSR1(t)
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("run status = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for duplicate-signal run")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
 func TestProcessHandlesClosedStdinPipe(t *testing.T) {
 	binary := buildOutage(t)
 	cmd := exec.Command(binary, "signal:USR1")
