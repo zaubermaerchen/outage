@@ -430,6 +430,453 @@ func TestValidateDurationEventAcceptsGoDurationSyntax(t *testing.T) {
 	}
 }
 
+func TestValidateAndConditionsRequireExactSeparatorAndPreserveOperands(t *testing.T) {
+	if err := validateArgs([]string{"duration:1s && duration:2s"}); err != nil {
+		t.Fatalf("validateArgs(exact AND expression) = %v, want nil", err)
+	}
+
+	for _, tc := range []struct {
+		name           string
+		event          string
+		wantDiagnostic string
+	}{
+		{
+			name:           "missing separator spaces",
+			event:          "duration:1s&&duration:2s",
+			wantDiagnostic: "duration:1s&&duration:2s",
+		},
+		{
+			name:           "space retained on left operand",
+			event:          "duration:1s  && duration:2s",
+			wantDiagnostic: "duration:1s ",
+		},
+		{
+			name:           "space retained on right operand",
+			event:          "duration:1s &&  duration:2s",
+			wantDiagnostic: " duration:2s",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{tc.event}, unreadableReader{}, &stdout, &stderr)
+			if code != exitArgError {
+				t.Fatalf("event %q: exit code = %d, want %d; stderr = %q", tc.event, code, exitArgError, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("event %q: stdout = %q, want empty", tc.event, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantDiagnostic) {
+				t.Fatalf("event %q: stderr = %q, want diagnostic containing %q", tc.event, stderr.String(), tc.wantDiagnostic)
+			}
+		})
+	}
+}
+
+func TestRunRejectsEmptyAndConditionMembersWithoutReadingStdin(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		event          string
+		wantDiagnostic string
+	}{
+		{name: "leading separator", event: " && signal:USR1", wantDiagnostic: `""`},
+		{name: "trailing separator", event: "signal:USR1 && ", wantDiagnostic: `""`},
+		{name: "consecutive separators", event: "signal:USR1 &&  && signal:USR2", wantDiagnostic: `""`},
+		{name: "first invalid member", event: "signal:TERM && signal:USR1", wantDiagnostic: `"signal:TERM"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{tc.event}, unreadableReader{}, &stdout, &stderr)
+			if code != exitArgError {
+				t.Fatalf("event %q: exit code = %d, want %d; stderr = %q", tc.event, code, exitArgError, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("event %q: stdout = %q, want empty", tc.event, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantDiagnostic) {
+				t.Fatalf("event %q: stderr = %q, want diagnostic containing %q", tc.event, stderr.String(), tc.wantDiagnostic)
+			}
+		})
+	}
+}
+
+func TestRunAndConditionsLatchSatisfiedMembersUntilAllArrive(t *testing.T) {
+	location := time.UTC
+	now := time.Date(2026, time.September, 3, 17, 0, 0, 0, location)
+	firstTimer := make(chan time.Time, 1)
+	secondTimer := make(chan time.Time, 1)
+	armed := make(chan time.Duration, 2)
+	stopped := make(chan struct{}, 2)
+	timerCalls := 0
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: location,
+		newTimer: func(delay time.Duration) (<-chan time.Time, func()) {
+			timerCalls++
+			armed <- delay
+			if timerCalls == 1 {
+				return firstTimer, func() { stopped <- struct{}{} }
+			}
+			return secondTimer, func() { stopped <- struct{}{} }
+		},
+	}
+	reader := &fileEventReader{
+		payload: []byte("input before AND conditions"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var diagnostics bytes.Buffer
+	result := make(chan int, 1)
+	readerStarted := false
+	finished := false
+	go func() {
+		result <- runWithClock([]string{"duration:1s && duration:2s"}, reader, writer, &diagnostics, clock)
+	}()
+
+	t.Cleanup(func() {
+		if readerStarted {
+			close(reader.release)
+			select {
+			case <-reader.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for blocked reader cleanup")
+			}
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for run cleanup")
+			}
+		}
+	})
+
+	for _, want := range []time.Duration{time.Second, 2 * time.Second} {
+		select {
+		case got := <-armed:
+			if got != want {
+				t.Fatalf("timer delay = %v, want %v", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for AND condition timer")
+		}
+	}
+	select {
+	case <-reader.started:
+		readerStarted = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for AND condition input reader")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for AND condition input forwarding")
+	}
+
+	// Satisfying the second member first must latch it without firing the
+	// aggregate event while the first member remains pending.
+	secondTimer <- now
+	select {
+	case code := <-result:
+		t.Fatalf("run exited after one AND member with code %d", code)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	firstTimer <- now
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("run status = %d, want %d; diagnostics = %q", code, exitOK, diagnostics.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for all AND conditions")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first AND condition timer was not cleaned up")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second AND condition timer was not cleaned up")
+	}
+	if writer.output.String() != "input before AND conditions" {
+		t.Fatalf("stdout = %q, want %q", writer.output.String(), "input before AND conditions")
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("diagnostics = %q, want empty", diagnostics.String())
+	}
+}
+
+func TestRunAndConditionsMatchDuplicateFilePathWithOneCreation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trigger")
+	reader := &fileEventReader{
+		payload: []byte("input before duplicate file conditions"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var diagnostics bytes.Buffer
+	result := make(chan int, 1)
+	readerStarted := false
+	finished := false
+	go func() {
+		result <- run([]string{"file:" + path + " && file:" + path}, reader, writer, &diagnostics)
+	}()
+
+	t.Cleanup(func() {
+		if readerStarted {
+			close(reader.release)
+			select {
+			case <-reader.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for blocked reader cleanup")
+			}
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for run cleanup")
+			}
+		}
+	})
+
+	select {
+	case <-reader.started:
+		readerStarted = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for duplicate-file input reader")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for duplicate-file input forwarding")
+	}
+
+	if err := os.WriteFile(path, []byte("trigger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("run status = %d, want %d; diagnostics = %q", code, exitOK, diagnostics.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for duplicate-file conditions")
+	}
+	if writer.output.String() != "input before duplicate file conditions" {
+		t.Fatalf("stdout = %q, want %q", writer.output.String(), "input before duplicate file conditions")
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("diagnostics = %q, want empty", diagnostics.String())
+	}
+}
+
+func TestRunAndDurationEquivalentConditionsShareOneMonitor(t *testing.T) {
+	location := time.UTC
+	now := time.Date(2026, time.September, 3, 17, 0, 0, 0, location)
+	timerC := make(chan time.Time, 1)
+	armed := make(chan struct{}, 2)
+	stopped := make(chan struct{}, 2)
+	timerCalls := 0
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: location,
+		newTimer: func(time.Duration) (<-chan time.Time, func()) {
+			timerCalls++
+			armed <- struct{}{}
+			return timerC, func() { stopped <- struct{}{} }
+		},
+	}
+	reader := &fileEventReader{
+		payload: []byte("input before equivalent durations"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var diagnostics bytes.Buffer
+	result := make(chan int, 1)
+	readerStarted := false
+	finished := false
+	go func() {
+		result <- runWithClock([]string{"duration:1s && duration:1000ms"}, reader, writer, &diagnostics, clock)
+	}()
+
+	t.Cleanup(func() {
+		close(reader.release)
+		if readerStarted {
+			select {
+			case <-reader.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for blocked reader cleanup")
+			}
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for equivalent-duration run cleanup")
+			}
+		}
+	})
+
+	select {
+	case <-armed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for equivalent-duration monitor")
+	}
+	select {
+	case <-armed:
+		t.Fatal("equivalent durations installed more than one monitor")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if timerCalls != 1 {
+		t.Fatalf("timer calls = %d, want 1", timerCalls)
+	}
+	select {
+	case <-reader.started:
+		readerStarted = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for equivalent-duration input reader")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for equivalent-duration input forwarding")
+	}
+
+	timerC <- now
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("run status = %d, want %d; diagnostics = %q", code, exitOK, diagnostics.String())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("one duration observation did not satisfy equivalent conditions")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("equivalent-duration monitor was not cleaned up")
+	}
+	if writer.output.String() != "input before equivalent durations" {
+		t.Fatalf("stdout = %q, want %q", writer.output.String(), "input before equivalent durations")
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("diagnostics = %q, want empty", diagnostics.String())
+	}
+}
+
+func TestRunAndDatetimeEquivalentInstantsShareOneMonitor(t *testing.T) {
+	location := time.UTC
+	now := time.Date(2026, time.September, 3, 17, 0, 0, 0, location)
+	timerC := make(chan time.Time, 1)
+	armed := make(chan time.Duration, 2)
+	stopped := make(chan struct{}, 2)
+	timerCalls := 0
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: location,
+		newTimer: func(delay time.Duration) (<-chan time.Time, func()) {
+			timerCalls++
+			armed <- delay
+			return timerC, func() { stopped <- struct{}{} }
+		},
+	}
+	reader := &fileEventReader{
+		payload: []byte("input before equivalent datetimes"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var diagnostics bytes.Buffer
+	result := make(chan int, 1)
+	readerStarted := false
+	finished := false
+	go func() {
+		result <- runWithClock([]string{
+			"datetime:2026-09-03T18:00:00Z && datetime:2026-09-03T19:00:00+01:00",
+		}, reader, writer, &diagnostics, clock)
+	}()
+
+	t.Cleanup(func() {
+		close(reader.release)
+		if readerStarted {
+			select {
+			case <-reader.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for blocked reader cleanup")
+			}
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for equivalent-datetime run cleanup")
+			}
+		}
+	})
+
+	select {
+	case delay := <-armed:
+		if delay != time.Hour {
+			t.Fatalf("timer delay = %v, want %v", delay, time.Hour)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for equivalent-datetime monitor")
+	}
+	select {
+	case <-armed:
+		t.Fatal("equivalent datetimes installed more than one monitor")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if timerCalls != 1 {
+		t.Fatalf("timer calls = %d, want 1", timerCalls)
+	}
+	select {
+	case <-reader.started:
+		readerStarted = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for equivalent-datetime input reader")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for equivalent-datetime input forwarding")
+	}
+
+	timerC <- now
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("run status = %d, want %d; diagnostics = %q", code, exitOK, diagnostics.String())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("one datetime observation did not satisfy equivalent instants")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("equivalent-datetime monitor was not cleaned up")
+	}
+	if writer.output.String() != "input before equivalent datetimes" {
+		t.Fatalf("stdout = %q, want %q", writer.output.String(), "input before equivalent datetimes")
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("diagnostics = %q, want empty", diagnostics.String())
+	}
+}
+
 func TestRunDurationEventForwardsAndExitsWithoutEOF(t *testing.T) {
 	const duration = 250 * time.Millisecond
 
