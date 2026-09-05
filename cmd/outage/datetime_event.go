@@ -1,6 +1,6 @@
 package main
 
-// This file parses local datetime event values and monitors absolute deadlines.
+// This file parses datetime event values and monitors absolute deadlines.
 
 import (
 	"fmt"
@@ -56,8 +56,8 @@ func (clock runtimeClock) normalized() runtimeClock {
 	return clock
 }
 
-// parseDatetimeEvent parses the event's exact datetime: prefix and local
-// wall-clock value, returning a diagnostic that identifies the event type.
+// parseDatetimeEvent parses the event's exact datetime: prefix and deadline,
+// returning a diagnostic that identifies the event type.
 func parseDatetimeEvent(event string, location *time.Location) (time.Time, error) {
 	if !strings.HasPrefix(event, "datetime:") {
 		return time.Time{}, fmt.Errorf("invalid datetime %q: missing datetime: prefix", event)
@@ -70,11 +70,33 @@ func parseDatetimeEvent(event string, location *time.Location) (time.Time, error
 	return deadline, nil
 }
 
-// parseAbsoluteDeadline accepts only the two documented local wall-clock
-// layouts. The explicit checks are intentional: time.Parse and time.Date
-// otherwise accept or normalize several values outside the CLI contract.
+// parseAbsoluteDeadline accepts the documented local wall-clock layouts and
+// strict RFC3339 values with an explicit timezone. The explicit checks are
+// intentional: time.Parse and time.Date otherwise accept or normalize several
+// values outside the CLI contract.
 func parseAbsoluteDeadline(value string, location *time.Location) (time.Time, error) {
 	location = normalizeLocation(location)
+	if (len(value) == 20 && value[19] == 'Z') ||
+		(len(value) == 25 && (value[19] == '+' || value[19] == '-')) {
+		if len(value) == 25 {
+			// time.Parse normalizes some out-of-range offset minutes, so
+			// validate the textual RFC3339 offset before parsing it.
+			if !allASCIIDigits(value[20:22]) || value[22] != ':' || !allASCIIDigits(value[23:25]) {
+				return time.Time{}, fmt.Errorf("datetime timezone offset must use ±HH:MM")
+			}
+			if parseASCIIDigits(value[20:22]) > 23 || parseASCIIDigits(value[23:25]) > 59 {
+				return time.Time{}, fmt.Errorf("datetime timezone offset is out of range")
+			}
+		}
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("datetime must use RFC3339 with seconds and timezone: %w", err)
+		}
+		if parsed.Year() < 1 || parsed.Year() > 9999 {
+			return time.Time{}, fmt.Errorf("datetime year must be between 0001 and 9999")
+		}
+		return parsed, nil
+	}
 	if len(value) != len("2006-01-02T15:04") && len(value) != len("2006-01-02T15:04:05") {
 		return time.Time{}, fmt.Errorf("datetime must use YYYY-MM-DDTHH:MM[:SS]")
 	}
