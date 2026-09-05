@@ -28,6 +28,7 @@ const helpText = `Usage: outage signal:USR1
        outage datetime:YYYY-MM-DDTHH:MM:SS
        outage datetime:YYYY-MM-DDTHH:MM:SSZ
        outage datetime:YYYY-MM-DDTHH:MM:SS+HH:MM
+       outage datetime:YYYY-MM-DDTHH:MM:SS-HH:MM
 
 Copy stdin to stdout until the event is received. Receiving the event exits outage;
 it does not send a signal directly to the producer.

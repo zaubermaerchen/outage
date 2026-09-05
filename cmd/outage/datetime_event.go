@@ -82,7 +82,7 @@ func parseAbsoluteDeadline(value string, location *time.Location) (time.Time, er
 			// time.Parse normalizes some out-of-range offset minutes, so
 			// validate the textual RFC3339 offset before parsing it.
 			if !allASCIIDigits(value[20:22]) || value[22] != ':' || !allASCIIDigits(value[23:25]) {
-				return time.Time{}, fmt.Errorf("datetime timezone offset must use ±HH:MM")
+				return time.Time{}, fmt.Errorf("datetime timezone offset must use +HH:MM or -HH:MM")
 			}
 			if parseASCIIDigits(value[20:22]) > 23 || parseASCIIDigits(value[23:25]) > 59 {
 				return time.Time{}, fmt.Errorf("datetime timezone offset is out of range")

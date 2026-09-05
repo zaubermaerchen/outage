@@ -194,6 +194,7 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 		"outage datetime:YYYY-MM-DDTHH:MM:SS",
 		"outage datetime:YYYY-MM-DDTHH:MM:SSZ",
 		"outage datetime:YYYY-MM-DDTHH:MM:SS+HH:MM",
+		"outage datetime:YYYY-MM-DDTHH:MM:SS-HH:MM",
 		"datetime:YYYY-MM-DDTHH:MM[:SS]",
 		"datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]",
 		"RFC3339",

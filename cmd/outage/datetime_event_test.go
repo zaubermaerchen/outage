@@ -61,6 +61,17 @@ func TestParseAbsoluteDeadlineAcceptsExplicitRFC3339Timezones(t *testing.T) {
 	}
 }
 
+func TestParseAbsoluteDeadlineRejectsMalformedNumericOffsetWithASCIIHint(t *testing.T) {
+	_, err := parseAbsoluteDeadline("2026-09-03T18:00:00+09:0X", time.UTC)
+	if err == nil {
+		t.Fatal("parseAbsoluteDeadline unexpectedly accepted malformed numeric offset")
+	}
+	const want = "datetime timezone offset must use +HH:MM or -HH:MM"
+	if got := err.Error(); got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
 func TestParseAbsoluteDeadlineRejectsMalformedValues(t *testing.T) {
 	location := time.UTC
 	for _, value := range []string{
