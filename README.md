@@ -56,15 +56,19 @@ To exit at a local wall-clock time, use a positional datetime event:
 producer | outage datetime:2026-09-03T18:00 | consumer
 ```
 
-The accepted forms are `YYYY-MM-DDTHH:MM` and `YYYY-MM-DDTHH:MM:SS`; omitted
-seconds mean `00`. The value is interpreted in the local timezone captured when
-`outage` starts and is monitored immediately, without waiting for stdin. A
-datetime that has already been reached exits without reading stdin. Local times
-skipped by a daylight-saving transition are invalid; when a local time occurs
-twice, the earlier absolute occurrence is selected. Timezone suffixes,
-fractional seconds, and other formats are invalid. While a future datetime is
-pending, stdin is forwarded to stdout; when it is reached, `outage` exits
-without waiting for EOF or draining remaining input.
+The accepted timezone-less forms are `YYYY-MM-DDTHH:MM` and
+`YYYY-MM-DDTHH:MM:SS`; omitted seconds mean `00`. RFC3339 forms with an
+explicit numeric offset or `Z` are also accepted, but seconds are required, for
+example `YYYY-MM-DDTHH:MM:SS+09:00` or `YYYY-MM-DDTHH:MM:SSZ`. Timezone-less
+values are interpreted in the local timezone captured when `outage` starts;
+explicit timezone values identify their absolute instant directly. Datetimes
+are monitored immediately, without waiting for stdin. A datetime that has
+already been reached exits without reading stdin. Local times skipped by a
+daylight-saving transition are invalid; when a local time occurs twice, the
+earlier absolute occurrence is selected. IANA timezone names, fractional
+seconds, and other formats are invalid. While a future datetime is pending,
+stdin is forwarded to stdout; when it is reached, `outage` exits without waiting
+for EOF or draining remaining input.
 
 Normal forwarding:
 
@@ -106,7 +110,8 @@ and the producer. Stopping the producer itself is not guaranteed.
   The path may be relative or absolute and may contain colons. `duration:<value>`
   exits after the Go duration value elapses, measured from process start.
   `datetime:YYYY-MM-DDTHH:MM[:SS]` exits when the local wall clock reaches the
-  specified time, using the local timezone captured at startup.
+  specified time, using the local timezone captured at startup. RFC3339 values
+  with seconds and an explicit numeric offset or `Z` are also supported.
 - `-h` and `--help` display help. A help token has highest priority wherever it
   appears in the argument list, even alongside invalid arguments or `--version`.
 - Standalone `--version` prints the version.
@@ -116,8 +121,8 @@ and the producer. Stopping the producer itself is not guaranteed.
 USR1 and USR2 events are supported on the Unix systems covered by the
 implementation, including Linux and macOS. Windows builds support help and
 version output, portable polling for `file:<path>` events, and portable
-`duration:<value>` and `datetime:YYYY-MM-DDTHH:MM[:SS]` events on all target
-platforms. Signal events remain unsupported on Windows.
+`duration:<value>` and datetime events on all target platforms. Signal events
+remain unsupported on Windows.
 
 ## Release builds
 

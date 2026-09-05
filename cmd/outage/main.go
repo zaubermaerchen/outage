@@ -26,6 +26,9 @@ const helpText = `Usage: outage signal:USR1
        outage duration:<value>
        outage datetime:YYYY-MM-DDTHH:MM
        outage datetime:YYYY-MM-DDTHH:MM:SS
+       outage datetime:YYYY-MM-DDTHH:MM:SSZ
+       outage datetime:YYYY-MM-DDTHH:MM:SS+HH:MM
+       outage datetime:YYYY-MM-DDTHH:MM:SS-HH:MM
 
 Copy stdin to stdout until the event is received. Receiving the event exits outage;
 it does not send a signal directly to the producer.
@@ -34,7 +37,9 @@ File events exit when the specified path exists.
 Duration events use Go duration syntax and exit after the specified time has elapsed.
 Datetime events use the process-local wall clock captured at startup and begin
 monitoring immediately. A datetime already reached exits without reading stdin;
-DST gaps and malformed, timezone-qualified, or fractional values are invalid.
+DST gaps and malformed values are invalid. RFC3339 timezone-qualified values
+require seconds and use numeric offsets or Z; IANA timezone names and fractional
+values are invalid.
 For an ambiguous DST overlap, the earlier absolute occurrence is selected.
 
 Arguments:
@@ -45,6 +50,8 @@ Arguments:
   datetime:YYYY-MM-DDTHH:MM[:SS]
                              Exit when the local wall clock reaches the datetime
                              (seconds may be omitted).
+  datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]
+                             RFC3339 form; explicit timezones require seconds.
 Options:
   --version                 Print the version (standalone).
   -h, --help                Show this help.

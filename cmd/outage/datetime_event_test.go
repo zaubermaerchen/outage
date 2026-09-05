@@ -1,6 +1,6 @@
 package main
 
-// This file verifies strict local datetime parsing and deadline monitoring.
+// This file verifies strict datetime parsing and deadline monitoring.
 
 import (
 	"bytes"
@@ -35,6 +35,43 @@ func TestParseAbsoluteDeadlineAcceptsSupportedForms(t *testing.T) {
 	}
 }
 
+func TestParseAbsoluteDeadlineAcceptsExplicitRFC3339Timezones(t *testing.T) {
+	location := time.FixedZone("caller", -5*60*60)
+	for _, tc := range []struct {
+		value      string
+		want       time.Time
+		wantOffset int
+	}{
+		{value: "2026-09-06T00:00:00Z", want: time.Date(2026, time.September, 6, 0, 0, 0, 0, time.UTC), wantOffset: 0},
+		{value: "2026-09-06T09:00:00+09:00", want: time.Date(2026, time.September, 6, 9, 0, 0, 0, time.FixedZone("+09:00", 9*60*60)), wantOffset: 9 * 60 * 60},
+		{value: "2026-09-06T09:00:00-04:30", want: time.Date(2026, time.September, 6, 9, 0, 0, 0, time.FixedZone("-04:30", -4*60*60-30*60)), wantOffset: -4*60*60 - 30*60},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			got, err := parseAbsoluteDeadline(tc.value, location)
+			if err != nil {
+				t.Fatalf("parseAbsoluteDeadline returned error: %v", err)
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("deadline = %s (%s), want %s (%s)", got, got.UTC(), tc.want, tc.want.UTC())
+			}
+			if _, offset := got.Zone(); offset != tc.wantOffset {
+				t.Fatalf("timezone offset = %d, want %d", offset, tc.wantOffset)
+			}
+		})
+	}
+}
+
+func TestParseAbsoluteDeadlineRejectsMalformedNumericOffsetWithASCIIHint(t *testing.T) {
+	_, err := parseAbsoluteDeadline("2026-09-03T18:00:00+09:0X", time.UTC)
+	if err == nil {
+		t.Fatal("parseAbsoluteDeadline unexpectedly accepted malformed numeric offset")
+	}
+	const want = "datetime timezone offset must use +HH:MM or -HH:MM"
+	if got := err.Error(); got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
 func TestParseAbsoluteDeadlineRejectsMalformedValues(t *testing.T) {
 	location := time.UTC
 	for _, value := range []string{
@@ -58,6 +95,16 @@ func TestParseAbsoluteDeadlineRejectsMalformedValues(t *testing.T) {
 		"2026-09-03T18:00.1",
 		"2026-09-03T18:00Z",
 		"2026-09-03T18:00+09:00",
+		"2026-09-03T18:00:00.1Z",
+		"2026-09-03T18:00:00.123+09:00",
+		"2026-09-03T18:00:00z",
+		"2026-09-03T18:00:00+09",
+		"2026-09-03T18:00:00+0900",
+		"2026-09-03T18:00:00+24:00",
+		"2026-09-03T18:00:00+09:60",
+		"2026-09-03T18:00:00UTC",
+		"2026-09-03T18:00:00Asia/Tokyo",
+		"0000-01-01T00:00:00Z",
 		"2026-09-03T18:00UTC",
 	} {
 		t.Run(value, func(t *testing.T) {
