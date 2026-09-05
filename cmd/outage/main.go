@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +30,7 @@ const helpText = `Usage: outage signal:USR1
        outage datetime:YYYY-MM-DDTHH:MM:SSZ
        outage datetime:YYYY-MM-DDTHH:MM:SS+HH:MM
        outage datetime:YYYY-MM-DDTHH:MM:SS-HH:MM
+       outage 'signal:USR1 && file:/tmp/stop'
 
 Copy stdin to stdout until the event is received. Receiving the event exits outage;
 it does not send a signal directly to the producer.
@@ -41,6 +43,11 @@ DST gaps and malformed values are invalid. RFC3339 timezone-qualified values
 require seconds and use numeric offsets or Z; IANA timezone names and fractional
 values are invalid.
 For an ambiguous DST overlap, the earlier absolute occurrence is selected.
+Conditions may be combined with the exact literal " && " separator. Every
+condition must be satisfied; satisfied conditions remain latched, and need not
+occur simultaneously. Operands are not trimmed. Quote a combined expression
+for the shell. Leading, trailing, or consecutive separators are invalid; only
+AND combinations are supported.
 
 Arguments:
   signal:USR1                Exit on USR1 (signal:SIGUSR1 is an alias).
@@ -98,61 +105,37 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		return exitArgError
 	}
 
-	event := args[0]
-	var eventCh <-chan os.Signal
-	var durationCh <-chan time.Time
-	var datetimeCh <-chan time.Time
-	var stopEventMonitor func()
-	if strings.HasPrefix(event, "duration:") {
-		duration, err := parseDurationEvent(event)
-		if err != nil {
-			writeDiagnostic(errOut, err)
-			return exitArgError
-		}
-		if duration == 0 {
-			return exitOK
-		}
-		remaining := duration - clock.now().Sub(startedAt)
-		if remaining <= 0 {
-			return exitOK
-		}
-		durationCh, stopEventMonitor = clock.newTimer(remaining)
-		if durationCh == nil {
-			if stopEventMonitor != nil {
-				stopEventMonitor()
-			}
-			return exitOK
-		}
-		ignoreSIGPIPE()
-	} else if strings.HasPrefix(event, "datetime:") {
-		deadline, err := parseDatetimeEvent(event, clock.location)
-		if err != nil {
-			writeDiagnostic(errOut, err)
-			return exitArgError
-		}
-		if !deadline.After(startedAt) {
-			return exitOK
-		}
-		datetimeCh, stopEventMonitor = startDeadlineMonitor(&deadline, clock.now, clock.newTimer)
-		if datetimeCh == nil {
-			return exitOK
-		}
-		ignoreSIGPIPE()
-	} else if strings.HasPrefix(event, "file:") {
-		path := strings.TrimPrefix(event, "file:")
-		if _, err := os.Lstat(path); err == nil {
-			return exitOK
-		} else if !os.IsNotExist(err) {
-			writeDiagnostic(errOut, err)
-			return exitArgError
-		}
-		ignoreSIGPIPE()
-		eventCh, stopEventMonitor = installFileMonitor(path)
-	} else {
-		eventCh, stopEventMonitor = installSignalMonitor(event)
+	conditions, err := canonicalConditionGroups(strings.Split(args[0], " && "), clock.location)
+	if err != nil {
+		writeDiagnostic(errOut, err)
+		return exitArgError
 	}
-	if stopEventMonitor != nil {
-		defer stopEventMonitor()
+	notifications := make(chan int, len(conditions))
+	satisfied := make([]bool, len(conditions))
+	stops := make([]func(), 0, len(conditions))
+	defer func() {
+		for _, stop := range stops {
+			stop()
+		}
+	}()
+	pending := len(conditions)
+	for index, condition := range conditions {
+		isSatisfied, stop, err := installCondition(condition.value, index, startedAt, clock, notifications)
+		if err != nil {
+			writeDiagnostic(errOut, err)
+			return exitArgError
+		}
+		if isSatisfied {
+			satisfied[index] = true
+			pending--
+			continue
+		}
+		if stop != nil {
+			stops = append(stops, stop)
+		}
+	}
+	if pending == 0 {
+		return exitOK
 	}
 
 	copyDone := make(chan error, 1)
@@ -161,19 +144,162 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		copyDone <- err
 	}()
 
-	select {
-	case <-eventCh:
-		return exitOK
-	case <-durationCh:
-		return exitOK
-	case <-datetimeCh:
-		return exitOK
-	case err := <-copyDone:
-		if err != nil {
-			writeDiagnostic(errOut, err)
-			return exitCopyError
+	for pending > 0 {
+		select {
+		case index := <-notifications:
+			if satisfied[index] {
+				continue
+			}
+			satisfied[index] = true
+			pending--
+		case err := <-copyDone:
+			if err != nil {
+				writeDiagnostic(errOut, err)
+				return exitCopyError
+			}
+			return exitOK
 		}
-		return exitOK
+	}
+	return exitOK
+}
+
+type conditionIdentity struct {
+	kind  string
+	value string
+}
+
+type conditionGroup struct {
+	value string
+}
+
+func canonicalConditionGroups(conditions []string, location *time.Location) ([]conditionGroup, error) {
+	groups := make([]conditionGroup, 0, len(conditions))
+	seen := make(map[conditionIdentity]struct{}, len(conditions))
+	for _, condition := range conditions {
+		identity, err := canonicalConditionIdentity(condition, location)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[identity]; exists {
+			continue
+		}
+		seen[identity] = struct{}{}
+		groups = append(groups, conditionGroup{value: condition})
+	}
+	return groups, nil
+}
+
+func canonicalConditionIdentity(condition string, location *time.Location) (conditionIdentity, error) {
+	if strings.HasPrefix(condition, "duration:") {
+		duration, err := parseDurationEvent(condition)
+		if err != nil {
+			return conditionIdentity{}, err
+		}
+		return conditionIdentity{kind: "duration", value: fmt.Sprintf("%d", duration)}, nil
+	}
+	if strings.HasPrefix(condition, "datetime:") {
+		deadline, err := parseDatetimeEvent(condition, location)
+		if err != nil {
+			return conditionIdentity{}, err
+		}
+		return conditionIdentity{kind: "datetime", value: deadline.UTC().Format(time.RFC3339)}, nil
+	}
+	if strings.HasPrefix(condition, "file:") {
+		return conditionIdentity{kind: "file", value: strings.TrimPrefix(condition, "file:")}, nil
+	}
+	if signal, ok := canonicalSignalName(condition); ok {
+		return conditionIdentity{kind: "signal", value: signal}, nil
+	}
+	return conditionIdentity{kind: "signal", value: condition}, nil
+}
+
+// installCondition preserves each event monitor's existing semantics while
+// forwarding its first observation into the shared AND aggregation channel.
+// A small bridge is needed because the existing monitors intentionally expose
+// different channel element types (signals versus timer values).
+func installCondition(condition string, index int, startedAt time.Time, clock runtimeClock, notifications chan<- int) (bool, func(), error) {
+	if strings.HasPrefix(condition, "duration:") {
+		duration, err := parseDurationEvent(condition)
+		if err != nil {
+			return false, nil, err
+		}
+		if duration == 0 {
+			return true, nil, nil
+		}
+		remaining := duration - clock.now().Sub(startedAt)
+		if remaining <= 0 {
+			return true, nil, nil
+		}
+		durationCh, stop := clock.newTimer(remaining)
+		if durationCh == nil {
+			if stop != nil {
+				stop()
+			}
+			return true, nil, nil
+		}
+		ignoreSIGPIPE()
+		return false, bridgeCondition(durationCh, index, notifications, stop), nil
+	}
+
+	if strings.HasPrefix(condition, "datetime:") {
+		deadline, err := parseDatetimeEvent(condition, clock.location)
+		if err != nil {
+			return false, nil, err
+		}
+		if !deadline.After(startedAt) {
+			return true, nil, nil
+		}
+		datetimeCh, stop := startDeadlineMonitor(&deadline, clock.now, clock.newTimer)
+		if datetimeCh == nil {
+			return true, nil, nil
+		}
+		ignoreSIGPIPE()
+		return false, bridgeCondition(datetimeCh, index, notifications, stop), nil
+	}
+
+	if strings.HasPrefix(condition, "file:") {
+		path := strings.TrimPrefix(condition, "file:")
+		if _, err := os.Lstat(path); err == nil {
+			return true, nil, nil
+		} else if !os.IsNotExist(err) {
+			return false, nil, err
+		}
+		ignoreSIGPIPE()
+		eventCh, stop := installFileMonitor(path)
+		return false, bridgeCondition(eventCh, index, notifications, stop), nil
+	}
+
+	eventCh, stop := installSignalMonitor(condition)
+	return false, bridgeCondition(eventCh, index, notifications, stop), nil
+}
+
+func bridgeCondition[T any](source <-chan T, index int, notifications chan<- int, stopSource func()) func() {
+	done := make(chan struct{})
+	forwarded := make(chan struct{})
+	go func() {
+		defer close(forwarded)
+		select {
+		case _, ok := <-source:
+			if !ok {
+				return
+			}
+			select {
+			case notifications <- index:
+			case <-done:
+			}
+		case <-done:
+		}
+	}()
+
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			close(done)
+			if stopSource != nil {
+				stopSource()
+			}
+			<-forwarded
+		})
 	}
 }
 
@@ -182,6 +308,13 @@ func validateArgs(args []string) error {
 }
 
 func validateArgsAt(args []string, location *time.Location) error {
+	return validateArgsAtWithSignalSupport(args, location, signalEventSupported)
+}
+
+// validateArgsAtWithSignalSupport keeps syntax errors ahead of platform
+// capability errors. This ensures a malformed later member is diagnosed even
+// when an earlier signal is unsupported on the current platform.
+func validateArgsAtWithSignalSupport(args []string, location *time.Location, signalSupported func() bool) error {
 	if len(args) == 0 {
 		return errors.New("missing event argument")
 	}
@@ -193,6 +326,21 @@ func validateArgsAt(args []string, location *time.Location) error {
 	}
 
 	event := args[0]
+	conditions := strings.Split(event, " && ")
+	for _, condition := range conditions {
+		if err := validateConditionSyntaxAt(condition, location); err != nil {
+			return err
+		}
+	}
+	for _, condition := range conditions {
+		if err := validateConditionCapabilityAt(condition, signalSupported); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateConditionSyntaxAt(event string, location *time.Location) error {
 	if strings.HasPrefix(event, "duration:") {
 		_, err := parseDurationEvent(event)
 		return err
@@ -208,15 +356,41 @@ func validateArgsAt(args []string, location *time.Location) error {
 		return nil
 	}
 
-	if event != "signal:USR1" && event != "signal:SIGUSR1" &&
-		event != "signal:USR2" && event != "signal:SIGUSR2" {
+	if !isSignalEvent(event) {
 		return fmt.Errorf("unsupported event %q", event)
 	}
-	if !signalEventSupported() {
+
+	return nil
+}
+
+func validateConditionCapabilityAt(event string, signalSupported func() bool) error {
+	if !isSignalEvent(event) {
+		return nil
+	}
+	if signalSupported == nil {
+		signalSupported = signalEventSupported
+	}
+	if !signalSupported() {
 		return fmt.Errorf("unsupported event %q on this platform", event)
 	}
 
 	return nil
+}
+
+func isSignalEvent(event string) bool {
+	_, ok := canonicalSignalName(event)
+	return ok
+}
+
+func canonicalSignalName(event string) (string, bool) {
+	switch event {
+	case "signal:USR1", "signal:SIGUSR1":
+		return "USR1", true
+	case "signal:USR2", "signal:SIGUSR2":
+		return "USR2", true
+	default:
+		return "", false
+	}
 }
 
 func parseDurationEvent(event string) (time.Duration, error) {
