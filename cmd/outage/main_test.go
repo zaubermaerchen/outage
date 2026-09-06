@@ -1441,6 +1441,7 @@ func TestRunFileEventIgnoresDanglingSymlinkAppearing(t *testing.T) {
 	}
 	select {
 	case code := <-result:
+		finished = true
 		t.Fatalf("run exited before dangling symlink appeared with code %d", code)
 	default:
 	}
@@ -1454,6 +1455,18 @@ func TestRunFileEventIgnoresDanglingSymlinkAppearing(t *testing.T) {
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("path mode = %v, want symlink", info.Mode())
+	}
+
+	// Keep the dangling symlink in place across several polling intervals so
+	// the monitor must observe that it is not a regular file before the path is
+	// restored.
+	for i := 0; i < 3; i++ {
+		select {
+		case code := <-result:
+			finished = true
+			t.Fatalf("run exited while path was a dangling symlink with code %d", code)
+		case <-time.After(filePollInterval):
+		}
 	}
 
 	if err := os.Remove(path); err != nil {
