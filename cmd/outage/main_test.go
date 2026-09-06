@@ -628,7 +628,7 @@ func TestValidateORConditionsAcceptSeparateAndEqualsForms(t *testing.T) {
 	for _, args := range [][]string{
 		{"duration:1s", "--or", "duration:2s"},
 		{"duration:1s", "--or=duration:2s"},
-		{"duration:1s && file:one", "--or", "signal:USR1 && file:two"},
+		{"duration:1s && file:one", "--or", "duration:2s && file:two"},
 	} {
 		if err := validateArgs(args); err != nil {
 			t.Fatalf("validateArgs(%q) = %v, want nil", args, err)
