@@ -26,8 +26,8 @@ producer | outage signal:USR2 | consumer
 producer | outage signal:SIGUSR2 | consumer
 ```
 
-Multiple conditions can be combined in one positional event specification with
-the exact separator ` && `:
+Multiple conditions can be combined in one positional condition group with the
+exact separator ` && `:
 
 ```sh
 producer | outage 'signal:USR1 && file:/tmp/foo' | consumer
@@ -39,8 +39,14 @@ simultaneously. The separator is the literal ASCII space-ampersand-ampersand-
 space sequence; operands are not trimmed. Quote the complete expression so the
 shell passes it as one positional argument. An expression containing a leading,
 trailing, or consecutive separator is invalid. Paths containing the exact
-separator cannot be represented, and only AND combinations are supported (not
-OR, parentheses, negation, or other expression syntax).
+separator cannot be represented.
+
+Use `--or` (or `--or=CONDITION`) between alternative condition groups. `outage`
+exits when any group is satisfied:
+
+```sh
+producer | outage 'signal:USR1 && file:/tmp/foo' --or duration:30s | consumer
+```
 
 To exit when a path resolves to a regular file, use a positional file event:
 
@@ -120,8 +126,9 @@ and the producer. Stopping the producer itself is not guaranteed.
 
 ## Command-line interface
 
-- Normal operation requires exactly one positional event specification. The CLI
-  supports `signal:USR1` and `signal:USR2`, plus their case-sensitive
+- Normal operation requires one positional condition followed by zero or more
+  `--or CONDITION` or `--or=CONDITION` alternatives. The CLI supports
+  `signal:USR1` and `signal:USR2`, plus their case-sensitive
   `signal:SIGUSR1` and `signal:SIGUSR2` aliases. `file:<path>` exits when the
   path resolves to a regular file, waiting and forwarding stdin to stdout if it
   is not one yet.
@@ -130,8 +137,10 @@ and the producer. Stopping the producer itself is not guaranteed.
   `datetime:YYYY-MM-DDTHH:MM[:SS]` exits when the local wall clock reaches the
   specified time, using the local timezone captured at startup. RFC3339 values
   with seconds and an explicit numeric offset or `Z` are also supported. Any
-  of these conditions may be combined with the exact ` && ` separator; all
-  conditions are latched independently and must be satisfied before exit.
+  of these conditions may be combined with the exact ` && ` separator inside one
+  group; all group members are latched independently and must be satisfied
+  before that group is complete. Groups are OR alternatives, so any complete
+  group exits `outage`.
 - `-h` and `--help` display help. A help token has highest priority wherever it
   appears in the argument list, even alongside invalid arguments or `--version`.
 - Standalone `--version` prints the version.
