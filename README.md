@@ -42,16 +42,17 @@ trailing, or consecutive separator is invalid. Paths containing the exact
 separator cannot be represented, and only AND combinations are supported (not
 OR, parentheses, negation, or other expression syntax).
 
-To exit when a path exists, use a positional file event:
+To exit when a path resolves to a regular file, use a positional file event:
 
 ```sh
 producer | outage file:/tmp/foo | consumer
 ```
 
-The file event triggers immediately when `/tmp/foo` already exists. Otherwise,
-`outage` polls for the path while continuing to forward stdin to stdout. Any
-existing path, including a directory, triggers the event; the path after the
-first `file:` prefix is passed through unchanged.
+The file event triggers immediately when `/tmp/foo` already resolves to a
+regular file. Otherwise, `outage` polls for the path while continuing to
+forward stdin to stdout. A symlink to a regular file triggers the event;
+directories, dangling symlinks, and other non-regular paths do not. The path
+after the first `file:` prefix is passed through unchanged.
 
 To exit after a duration, use a positional duration event:
 
@@ -122,7 +123,8 @@ and the producer. Stopping the producer itself is not guaranteed.
 - Normal operation requires exactly one positional event specification. The CLI
   supports `signal:USR1` and `signal:USR2`, plus their case-sensitive
   `signal:SIGUSR1` and `signal:SIGUSR2` aliases. `file:<path>` exits when the
-  path exists, waiting and forwarding stdin to stdout if it is not present yet.
+  path resolves to a regular file, waiting and forwarding stdin to stdout if it
+  is not one yet.
   The path may be relative or absolute and may contain colons. `duration:<value>`
   exits after the Go duration value elapses, measured from process start.
   `datetime:YYYY-MM-DDTHH:MM[:SS]` exits when the local wall clock reaches the

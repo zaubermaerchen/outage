@@ -1,6 +1,6 @@
 package main
 
-// This file polls file event paths until one exists or the monitor is stopped.
+// This file polls file event paths until one is a regular file or the monitor is stopped.
 
 import (
 	"os"
@@ -9,6 +9,14 @@ import (
 )
 
 const filePollInterval = 100 * time.Millisecond
+
+func isRegularFile(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return info.Mode().IsRegular(), nil
+}
 
 func installFileMonitor(path string) (<-chan os.Signal, func()) {
 	events := make(chan os.Signal, 1)
@@ -24,7 +32,7 @@ func installFileMonitor(path string) (<-chan os.Signal, func()) {
 		for {
 			select {
 			case <-ticker.C:
-				if _, err := os.Lstat(path); err == nil {
+				if regular, _ := isRegularFile(path); regular {
 					events <- nil
 					return
 				}

@@ -35,7 +35,7 @@ const helpText = `Usage: outage signal:USR1
 Copy stdin to stdout until the event is received. Receiving the event exits outage;
 it does not send a signal directly to the producer.
 Signal events are unsupported on Windows.
-File events exit when the specified path exists.
+File events exit when the specified path resolves to a regular file.
 Duration events use Go duration syntax and exit after the specified time has elapsed.
 Datetime events use the process-local wall clock captured at startup and begin
 monitoring immediately. A datetime already reached exits without reading stdin;
@@ -52,7 +52,7 @@ AND combinations are supported.
 Arguments:
   signal:USR1                Exit on USR1 (signal:SIGUSR1 is an alias).
   signal:USR2                Exit on USR2 (signal:SIGUSR2 is an alias).
-  file:<path>                Exit when the specified path exists.
+  file:<path>                Exit when the specified path resolves to a regular file.
   duration:<value>           Exit after the duration has elapsed.
   datetime:YYYY-MM-DDTHH:MM[:SS]
                              Exit when the local wall clock reaches the datetime
@@ -259,8 +259,10 @@ func installCondition(condition string, index int, startedAt time.Time, clock ru
 
 	if strings.HasPrefix(condition, "file:") {
 		path := strings.TrimPrefix(condition, "file:")
-		if _, err := os.Lstat(path); err == nil {
-			return true, nil, nil
+		if regular, err := isRegularFile(path); err == nil {
+			if regular {
+				return true, nil, nil
+			}
 		} else if !os.IsNotExist(err) {
 			return false, nil, err
 		}

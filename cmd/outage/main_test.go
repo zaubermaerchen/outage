@@ -188,6 +188,7 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 		"signal:SIGUSR2",
 		"outage file:<path>",
 		"file:<path>",
+		"regular file",
 		"outage duration:<value>",
 		"duration:<value>",
 		"outage datetime:YYYY-MM-DDTHH:MM",
@@ -357,7 +358,7 @@ func TestRunWithoutHelpPreservesEventPassthrough(t *testing.T) {
 	}
 }
 
-func TestRunFileEventExitsImmediatelyWhenPathExists(t *testing.T) {
+func TestRunFileEventExitsImmediatelyWhenPathIsRegularFile(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(t *testing.T, path string)
@@ -372,11 +373,25 @@ func TestRunFileEventExitsImmediatelyWhenPathExists(t *testing.T) {
 			},
 		},
 		{
-			name: "directory",
+			name: "symlink to regular file",
 			setup: func(t *testing.T, path string) {
 				t.Helper()
-				if err := os.Mkdir(path, 0o700); err != nil {
+				if runtime.GOOS == "windows" {
+					t.Skip("symlink creation may require elevated permissions on Windows")
+				}
+				target := path + ".target"
+				if err := os.WriteFile(target, []byte("trigger"), 0o600); err != nil {
 					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Skipf("symlink creation unavailable: %v", err)
+				}
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !info.Mode().IsRegular() {
+					t.Fatalf("path mode = %v, want regular file target", info.Mode())
 				}
 			},
 		},
@@ -397,6 +412,89 @@ func TestRunFileEventExitsImmediatelyWhenPathExists(t *testing.T) {
 			}
 			if stderr.Len() != 0 {
 				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
+
+func TestIsRegularFileClassifiesPaths(t *testing.T) {
+	tests := []struct {
+		name          string
+		setup         func(t *testing.T, path string)
+		wantRegular   bool
+		wantStatError bool
+	}{
+		{
+			name: "regular file",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("regular"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRegular: true,
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "symlink to regular file",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if runtime.GOOS == "windows" {
+					t.Skip("symlink creation may require elevated permissions on Windows")
+				}
+				target := path + ".target"
+				if err := os.WriteFile(target, []byte("regular"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Skipf("symlink creation unavailable: %v", err)
+				}
+			},
+			wantRegular: true,
+		},
+		{
+			name: "dangling symlink",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if runtime.GOOS == "windows" {
+					t.Skip("symlink creation may require elevated permissions on Windows")
+				}
+				if err := os.Symlink("missing-target", path); err != nil {
+					t.Skipf("symlink creation unavailable: %v", err)
+				}
+			},
+			wantStatError: true,
+		},
+		{
+			name:        "FIFO",
+			setup:       setupFIFO,
+			wantRegular: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "path")
+			tc.setup(t, path)
+
+			gotRegular, err := isRegularFile(path)
+			if gotRegular != tc.wantRegular {
+				t.Fatalf("isRegularFile(%q) = %t, want %t; error = %v", path, gotRegular, tc.wantRegular, err)
+			}
+			if tc.wantStatError {
+				if err == nil || !os.IsNotExist(err) {
+					t.Fatalf("isRegularFile(%q) error = %v, want not-exist error", path, err)
+				}
+			} else if err != nil {
+				t.Fatalf("isRegularFile(%q) error = %v, want nil", path, err)
 			}
 		})
 	}
@@ -989,7 +1087,7 @@ func TestRunRejectsInvalidDurationWithoutReadingStdin(t *testing.T) {
 	}
 }
 
-func TestRunFileEventExitsImmediatelyWhenDanglingSymlinkExists(t *testing.T) {
+func TestRunFileEventWaitsWhenDanglingSymlinkExists(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation may require elevated permissions on Windows")
 	}
@@ -999,7 +1097,78 @@ func TestRunFileEventExitsImmediatelyWhenDanglingSymlinkExists(t *testing.T) {
 		t.Skipf("symlink creation unavailable: %v", err)
 	}
 
-	assertExistingFileEventExits(t, path)
+	reader := &fileEventReader{
+		payload: []byte("input before dangling symlink replacement"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var stderr bytes.Buffer
+	result := make(chan int, 1)
+	readerStarted := false
+	finished := false
+	go func() {
+		result <- run([]string{"file:" + path}, reader, writer, &stderr)
+	}()
+
+	t.Cleanup(func() {
+		if readerStarted {
+			close(reader.release)
+			select {
+			case <-reader.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for blocked reader cleanup")
+			}
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for run cleanup")
+			}
+		}
+	})
+
+	select {
+	case <-reader.started:
+		readerStarted = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for file-event input reader to start")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for input to be forwarded")
+	}
+	select {
+	case code := <-result:
+		finished = true
+		t.Fatalf("run exited while path was a dangling symlink with code %d", code)
+	default:
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("trigger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for regular-file event after dangling symlink replacement")
+	}
+	if got := writer.output.String(); got != "input before dangling symlink replacement" {
+		t.Fatalf("stdout = %q, want %q", got, "input before dangling symlink replacement")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
 }
 
 func TestRunFileEventPreservesRelativePath(t *testing.T) {
@@ -1140,7 +1309,87 @@ func TestRunFileEventWaitsAndForwardsUntilPathAppears(t *testing.T) {
 	}
 }
 
-func TestRunFileEventExitsWhenDanglingSymlinkAppears(t *testing.T) {
+func TestRunFileEventWaitsForRegularFileWhenPathIsDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trigger")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &fileEventReader{
+		payload: []byte("input before directory replacement"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var stderr bytes.Buffer
+	result := make(chan int, 1)
+	readerStarted := false
+	finished := false
+	go func() {
+		result <- run([]string{"file:" + path}, reader, writer, &stderr)
+	}()
+
+	t.Cleanup(func() {
+		if readerStarted {
+			close(reader.release)
+			select {
+			case <-reader.done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for blocked reader cleanup")
+			}
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for run cleanup")
+			}
+		}
+	})
+
+	select {
+	case <-reader.started:
+		readerStarted = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for file-event input reader to start")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for input to be forwarded")
+	}
+	select {
+	case code := <-result:
+		finished = true
+		t.Fatalf("run exited while path was a directory with code %d", code)
+	default:
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("trigger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for regular-file event after directory replacement")
+	}
+	if got := writer.output.String(); got != "input before directory replacement" {
+		t.Fatalf("stdout = %q, want %q", got, "input before directory replacement")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunFileEventIgnoresDanglingSymlinkAppearing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation may require elevated permissions on Windows")
 	}
@@ -1207,6 +1456,12 @@ func TestRunFileEventExitsWhenDanglingSymlinkAppears(t *testing.T) {
 		t.Fatalf("path mode = %v, want symlink", info.Mode())
 	}
 
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("trigger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case code := <-result:
 		finished = true
@@ -1214,7 +1469,7 @@ func TestRunFileEventExitsWhenDanglingSymlinkAppears(t *testing.T) {
 			t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for dangling symlink file event")
+		t.Fatal("timed out waiting for regular-file event after dangling symlink")
 	}
 	if got := writer.output.String(); got != "input before dangling symlink" {
 		t.Fatalf("stdout = %q, want %q", got, "input before dangling symlink")
