@@ -209,7 +209,7 @@ func parseConditionGroups(args []string) ([]conditionGroup, error) {
 
 func parseConditionArguments(args []string) ([]string, error) {
 	if len(args) == 0 {
-		return nil, errors.New("missing event argument")
+		return nil, errors.New("missing condition argument")
 	}
 
 	values := make([]string, 0, len(args))

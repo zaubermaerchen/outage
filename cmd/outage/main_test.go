@@ -2060,7 +2060,7 @@ func TestProcessRejectsInvalidArgumentsWithoutReadingStdin(t *testing.T) {
 		args           []string
 		wantDiagnostic string
 	}{
-		{name: "missing event", args: nil},
+		{name: "missing condition", args: nil, wantDiagnostic: "missing condition argument"},
 		{name: "bare removed event option", args: []string{"--event"}, wantDiagnostic: "--event"},
 		{name: "removed event option form", args: []string{"--event", "signal:USR1"}, wantDiagnostic: "--event"},
 		{name: "unsupported value", args: []string{"signal:TERM"}},
