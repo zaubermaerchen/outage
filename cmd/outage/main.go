@@ -19,7 +19,8 @@ const (
 	exitArgError  = 2
 )
 
-const helpText = `Usage: outage signal:USR1
+const helpText = `Usage: outage CONDITION [--or CONDITION]...
+Usage: outage signal:USR1
        outage signal:SIGUSR1
        outage signal:USR2
        outage signal:SIGUSR2
@@ -31,6 +32,7 @@ const helpText = `Usage: outage signal:USR1
        outage datetime:YYYY-MM-DDTHH:MM:SS+HH:MM
        outage datetime:YYYY-MM-DDTHH:MM:SS-HH:MM
        outage 'signal:USR1 && file:/tmp/stop'
+       outage 'signal:USR1 && file:/tmp/stop' --or duration:30s
 
 Copy stdin to stdout until the event is received. Receiving the event exits outage;
 it does not send a signal directly to the producer.
@@ -43,11 +45,12 @@ DST gaps and malformed values are invalid. RFC3339 timezone-qualified values
 require seconds and use numeric offsets or Z; IANA timezone names and fractional
 values are invalid.
 For an ambiguous DST overlap, the earlier absolute occurrence is selected.
-Conditions may be combined with the exact literal " && " separator. Every
-condition must be satisfied; satisfied conditions remain latched, and need not
-occur simultaneously. Operands are not trimmed. Quote a combined expression
-for the shell. Leading, trailing, or consecutive separators are invalid; only
-AND combinations are supported.
+Conditions may be combined with the exact literal " && " separator inside one
+AND group. Every member of an AND group must be satisfied; satisfied conditions
+remain latched, and need not occur simultaneously. Use --or between alternative
+groups; outage exits when any group is satisfied. Operands are not trimmed.
+Quote a combined expression for the shell. Leading, trailing, or consecutive
+separators are invalid.
 
 Arguments:
   signal:USR1                Exit on USR1 (signal:SIGUSR1 is an alias).
@@ -60,6 +63,8 @@ Arguments:
   datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]
                              RFC3339 form; explicit timezones require seconds.
 Options:
+  --or CONDITION            Use CONDITION as an alternative group. May be
+                            written as --or=CONDITION.
   --version                 Print the version (standalone).
   -h, --help                Show this help.
 Help options take priority over every other argument.
@@ -105,37 +110,47 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		return exitArgError
 	}
 
-	conditions, err := canonicalConditionGroups(strings.Split(args[0], " && "), clock.location)
+	groups, err := parseConditionGroups(args)
 	if err != nil {
 		writeDiagnostic(errOut, err)
 		return exitArgError
 	}
-	notifications := make(chan int, len(conditions))
-	satisfied := make([]bool, len(conditions))
-	stops := make([]func(), 0, len(conditions))
+	plan, err := canonicalConditionPlan(groups, clock.location)
+	if err != nil {
+		writeDiagnostic(errOut, err)
+		return exitArgError
+	}
+	notifications := make(chan int, len(plan.conditions))
+	satisfied := make([]bool, len(plan.conditions))
+	stops := make([]func(), 0, len(plan.conditions))
 	defer func() {
 		for _, stop := range stops {
 			stop()
 		}
 	}()
-	pending := len(conditions)
-	for index, condition := range conditions {
-		isSatisfied, stop, err := installCondition(condition.value, index, startedAt, clock, notifications)
+	for index, condition := range plan.conditions {
+		isSatisfied, stop, err := installCondition(condition, index, startedAt, clock, notifications)
 		if err != nil {
 			writeDiagnostic(errOut, err)
 			return exitArgError
 		}
 		if isSatisfied {
 			satisfied[index] = true
-			pending--
 			continue
 		}
 		if stop != nil {
 			stops = append(stops, stop)
 		}
 	}
-	if pending == 0 {
-		return exitOK
+	remaining := make([]int, len(plan.groups))
+	groupSatisfied := make([]bool, len(plan.groups))
+	for index, group := range plan.groups {
+		remaining[index] = len(group)
+	}
+	for index, isSatisfied := range satisfied {
+		if isSatisfied && satisfyConditionGroups(index, plan.groups, remaining, groupSatisfied) {
+			return exitOK
+		}
 	}
 
 	copyDone := make(chan error, 1)
@@ -144,14 +159,16 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		copyDone <- err
 	}()
 
-	for pending > 0 {
+	for {
 		select {
 		case index := <-notifications:
 			if satisfied[index] {
 				continue
 			}
 			satisfied[index] = true
-			pending--
+			if satisfyConditionGroups(index, plan.groups, remaining, groupSatisfied) {
+				return exitOK
+			}
 		case err := <-copyDone:
 			if err != nil {
 				writeDiagnostic(errOut, err)
@@ -160,7 +177,6 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 			return exitOK
 		}
 	}
-	return exitOK
 }
 
 type conditionIdentity struct {
@@ -169,24 +185,132 @@ type conditionIdentity struct {
 }
 
 type conditionGroup struct {
-	value string
+	members []string
 }
 
-func canonicalConditionGroups(conditions []string, location *time.Location) ([]conditionGroup, error) {
-	groups := make([]conditionGroup, 0, len(conditions))
-	seen := make(map[conditionIdentity]struct{}, len(conditions))
-	for _, condition := range conditions {
-		identity, err := canonicalConditionIdentity(condition, location)
-		if err != nil {
-			return nil, err
-		}
-		if _, exists := seen[identity]; exists {
-			continue
-		}
-		seen[identity] = struct{}{}
-		groups = append(groups, conditionGroup{value: condition})
+type conditionPlan struct {
+	conditions []string
+	groups     [][]int
+}
+
+func parseConditionGroups(args []string) ([]conditionGroup, error) {
+	values, err := parseConditionArguments(args)
+	if err != nil {
+		return nil, err
+	}
+	groups := make([]conditionGroup, 0, len(values))
+	for _, value := range values {
+		groups = append(groups, conditionGroup{
+			members: strings.Split(value, " && "),
+		})
 	}
 	return groups, nil
+}
+
+func parseConditionArguments(args []string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, errors.New("missing condition argument")
+	}
+
+	values := make([]string, 0, len(args))
+	hasCondition := false
+	pendingOR := false
+	for _, arg := range args {
+		switch {
+		case arg == "--or":
+			if !hasCondition {
+				return nil, errors.New("--or requires a preceding condition")
+			}
+			if pendingOR {
+				return nil, errors.New("--or requires a condition")
+			}
+			pendingOR = true
+		case strings.HasPrefix(arg, "--or="):
+			if !hasCondition {
+				return nil, errors.New("--or requires a preceding condition")
+			}
+			if pendingOR {
+				return nil, errors.New("--or requires a condition")
+			}
+			value := strings.TrimPrefix(arg, "--or=")
+			if value == "" {
+				return nil, errors.New("--or requires a condition")
+			}
+			values = append(values, value)
+		case strings.HasPrefix(arg, "-"):
+			if pendingOR {
+				return nil, errors.New("--or requires a condition")
+			}
+			return nil, fmt.Errorf("unexpected argument %q", arg)
+		default:
+			if !hasCondition {
+				values = append(values, arg)
+				hasCondition = true
+				continue
+			}
+			if !pendingOR {
+				return nil, fmt.Errorf("unexpected argument %q", arg)
+			}
+			values = append(values, arg)
+			pendingOR = false
+		}
+	}
+	if pendingOR {
+		return nil, errors.New("--or requires a condition")
+	}
+	return values, nil
+}
+
+func canonicalConditionPlan(groups []conditionGroup, location *time.Location) (conditionPlan, error) {
+	plan := conditionPlan{
+		conditions: make([]string, 0),
+		groups:     make([][]int, 0, len(groups)),
+	}
+	conditionIndexes := make(map[conditionIdentity]int)
+	for _, group := range groups {
+		members := group.members
+		groupIndexes := make([]int, 0, len(members))
+		seen := make(map[conditionIdentity]struct{}, len(members))
+		for _, condition := range members {
+			identity, err := canonicalConditionIdentity(condition, location)
+			if err != nil {
+				return conditionPlan{}, err
+			}
+			if _, exists := seen[identity]; exists {
+				continue
+			}
+			seen[identity] = struct{}{}
+			index, exists := conditionIndexes[identity]
+			if !exists {
+				index = len(plan.conditions)
+				conditionIndexes[identity] = index
+				plan.conditions = append(plan.conditions, condition)
+			}
+			groupIndexes = append(groupIndexes, index)
+		}
+		plan.groups = append(plan.groups, groupIndexes)
+	}
+	return plan, nil
+}
+
+func satisfyConditionGroups(conditionIndex int, groups [][]int, remaining []int, satisfied []bool) bool {
+	for groupIndex, members := range groups {
+		if satisfied[groupIndex] {
+			continue
+		}
+		for _, memberIndex := range members {
+			if memberIndex != conditionIndex {
+				continue
+			}
+			remaining[groupIndex]--
+			if remaining[groupIndex] == 0 {
+				satisfied[groupIndex] = true
+				return true
+			}
+			break
+		}
+	}
+	return false
 }
 
 func canonicalConditionIdentity(condition string, location *time.Location) (conditionIdentity, error) {
@@ -317,26 +441,22 @@ func validateArgsAt(args []string, location *time.Location) error {
 // capability errors. This ensures a malformed later member is diagnosed even
 // when an earlier signal is unsupported on the current platform.
 func validateArgsAtWithSignalSupport(args []string, location *time.Location, signalSupported func() bool) error {
-	if len(args) == 0 {
-		return errors.New("missing event argument")
+	groups, err := parseConditionGroups(args)
+	if err != nil {
+		return err
 	}
-	if strings.HasPrefix(args[0], "-") {
-		return fmt.Errorf("unexpected argument %q", args[0])
-	}
-	if len(args) > 1 {
-		return fmt.Errorf("unexpected argument %q", args[1])
-	}
-
-	event := args[0]
-	conditions := strings.Split(event, " && ")
-	for _, condition := range conditions {
-		if err := validateConditionSyntaxAt(condition, location); err != nil {
-			return err
+	for _, group := range groups {
+		for _, condition := range group.members {
+			if err := validateConditionSyntaxAt(condition, location); err != nil {
+				return err
+			}
 		}
 	}
-	for _, condition := range conditions {
-		if err := validateConditionCapabilityAt(condition, signalSupported); err != nil {
-			return err
+	for _, group := range groups {
+		for _, condition := range group.members {
+			if err := validateConditionCapabilityAt(condition, signalSupported); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

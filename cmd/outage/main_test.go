@@ -198,6 +198,9 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 		"outage datetime:YYYY-MM-DDTHH:MM:SS-HH:MM",
 		"datetime:YYYY-MM-DDTHH:MM[:SS]",
 		"datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]",
+		"Usage: outage CONDITION [--or CONDITION]...",
+		"--or CONDITION",
+		"--or=CONDITION",
 		"RFC3339",
 		"Arguments:",
 		"Options:",
@@ -618,6 +621,315 @@ func TestValidateConditionsCheckAllSyntaxBeforePlatformCapability(t *testing.T) 
 				t.Fatalf("error = %q, want diagnostic containing %q", err, tc.wantDiagnostic)
 			}
 		})
+	}
+}
+
+func TestValidateORConditionsAcceptSeparateAndEqualsForms(t *testing.T) {
+	for _, args := range [][]string{
+		{"duration:1s", "--or", "duration:2s"},
+		{"duration:1s", "--or=duration:2s"},
+		{"duration:1s && file:one", "--or", "duration:2s && file:two"},
+	} {
+		if err := validateArgs(args); err != nil {
+			t.Fatalf("validateArgs(%q) = %v, want nil", args, err)
+		}
+	}
+}
+
+func TestValidateORConditionsRejectMalformedComposition(t *testing.T) {
+	for _, args := range [][]string{
+		{"--or", "duration:1s"},
+		{"--or=duration:1s"},
+		{"duration:1s", "--or"},
+		{"duration:1s", "--or="},
+		{"duration:1s", "--or", "--or", "duration:2s"},
+		{"duration:1s", "duration:2s"},
+	} {
+		if err := validateArgs(args); err == nil {
+			t.Fatalf("validateArgs(%q) = nil, want error", args)
+		}
+	}
+}
+
+func TestValidateORGroupsCheckAllSyntaxBeforePlatformCapability(t *testing.T) {
+	signalUnsupported := func() bool { return false }
+	err := validateArgsAtWithSignalSupport(
+		[]string{"signal:USR1", "--or", "signal:USR2 && "},
+		time.UTC,
+		signalUnsupported,
+	)
+	if err == nil {
+		t.Fatal("validateArgsAtWithSignalSupport unexpectedly accepted malformed OR group")
+	}
+	if !strings.Contains(err.Error(), `unsupported event ""`) {
+		t.Fatalf("error = %q, want malformed member diagnostic before signal capability", err)
+	}
+}
+
+func TestRunWithClockAcceptsEqualsORCondition(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	clock := runtimeClock{
+		now:      func() time.Time { return time.Date(2026, time.September, 3, 17, 0, 0, 0, time.UTC) },
+		location: time.UTC,
+	}
+	code := runWithClock([]string{"duration:1h", "--or=duration:0s"}, unreadableReader{}, &stdout, &stderr, clock)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunORGroupsAllowFileAndDatetimeSources(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ready")
+	if err := os.WriteFile(path, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, time.September, 3, 17, 0, 0, 0, time.UTC)
+	deadline := now.Add(time.Hour)
+	timerCreated := make(chan struct{}, 1)
+	timerStopped := make(chan struct{}, 1)
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: time.UTC,
+		newTimer: func(time.Duration) (<-chan time.Time, func()) {
+			timerCreated <- struct{}{}
+			return make(chan time.Time), func() { timerStopped <- struct{}{} }
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	code := runWithClock([]string{
+		"datetime:" + deadline.Format("2006-01-02T15:04:05"),
+		"--or=file:" + path,
+	}, unreadableReader{}, &stdout, &stderr, clock)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+	}
+	select {
+	case <-timerCreated:
+	case <-time.After(5 * time.Second):
+		t.Fatal("datetime alternative was not monitored")
+	}
+	select {
+	case <-timerStopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("datetime monitor was not cleaned up after file alternative")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunORGroupsReleaseWhenAnyGroupIsSatisfied(t *testing.T) {
+	location := time.UTC
+	now := time.Date(2026, time.September, 3, 17, 0, 0, 0, location)
+	firstTimer := make(chan time.Time, 1)
+	secondTimer := make(chan time.Time, 1)
+	thirdTimer := make(chan time.Time, 1)
+	armed := make(chan time.Duration, 3)
+	stopped := make(chan struct{}, 3)
+	timerCalls := 0
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: location,
+		newTimer: func(delay time.Duration) (<-chan time.Time, func()) {
+			timerCalls++
+			armed <- delay
+			switch timerCalls {
+			case 1:
+				return firstTimer, func() { stopped <- struct{}{} }
+			case 2:
+				return secondTimer, func() { stopped <- struct{}{} }
+			default:
+				return thirdTimer, func() { stopped <- struct{}{} }
+			}
+		},
+	}
+	reader := &fileEventReader{
+		payload: []byte("input before OR condition"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var diagnostics bytes.Buffer
+	result := make(chan int, 1)
+	finished := false
+	go func() {
+		result <- runWithClock([]string{"duration:1s && duration:2s", "--or", "duration:3s"}, reader, writer, &diagnostics, clock)
+	}()
+
+	t.Cleanup(func() {
+		close(reader.release)
+		select {
+		case <-reader.done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for blocked reader cleanup")
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for OR run cleanup")
+			}
+		}
+	})
+
+	for _, want := range []time.Duration{time.Second, 2 * time.Second} {
+		select {
+		case got := <-armed:
+			if got != want {
+				t.Fatalf("timer delay = %v, want %v", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for OR condition timer")
+		}
+	}
+	select {
+	case got := <-armed:
+		if got != 3*time.Second {
+			t.Fatalf("timer delay = %v, want 3s", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for OR alternative timer")
+	}
+	select {
+	case <-reader.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for OR condition input reader")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for OR condition input forwarding")
+	}
+
+	secondTimer <- now
+	select {
+	case code := <-result:
+		t.Fatalf("run exited after incomplete AND group with code %d", code)
+	case <-time.After(100 * time.Millisecond):
+	}
+	firstTimer <- now
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("run status = %d, want %d; diagnostics = %q", code, exitOK, diagnostics.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for OR group")
+	}
+	for range 3 {
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatal("OR condition monitor was not cleaned up")
+		}
+	}
+	if writer.output.String() != "input before OR condition" {
+		t.Fatalf("stdout = %q, want %q", writer.output.String(), "input before OR condition")
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("diagnostics = %q, want empty", diagnostics.String())
+	}
+}
+
+func TestRunORConditionFansOutCanonicalEventAcrossGroups(t *testing.T) {
+	location := time.UTC
+	now := time.Date(2026, time.September, 3, 17, 0, 0, 0, location)
+	firstTimer := make(chan time.Time, 1)
+	secondTimer := make(chan time.Time, 1)
+	armed := make(chan time.Duration, 2)
+	stopped := make(chan struct{}, 2)
+	timerCalls := 0
+	clock := runtimeClock{
+		now:      func() time.Time { return now },
+		location: location,
+		newTimer: func(delay time.Duration) (<-chan time.Time, func()) {
+			timerCalls++
+			armed <- delay
+			if timerCalls == 1 {
+				return firstTimer, func() { stopped <- struct{}{} }
+			}
+			return secondTimer, func() { stopped <- struct{}{} }
+		},
+	}
+	reader := &fileEventReader{
+		payload: []byte("input before fan-out"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var diagnostics bytes.Buffer
+	result := make(chan int, 1)
+	finished := false
+	go func() {
+		result <- runWithClock([]string{"duration:1s && duration:2s", "--or", "duration:1s"}, reader, writer, &diagnostics, clock)
+	}()
+
+	t.Cleanup(func() {
+		close(reader.release)
+		select {
+		case <-reader.done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for blocked reader cleanup")
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(5 * time.Second):
+				t.Errorf("timed out waiting for fan-out run cleanup")
+			}
+		}
+	})
+
+	for _, want := range []time.Duration{time.Second, 2 * time.Second} {
+		select {
+		case got := <-armed:
+			if got != want {
+				t.Fatalf("timer delay = %v, want %v", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for fan-out timer")
+		}
+	}
+	select {
+	case <-reader.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for fan-out input reader")
+	}
+	select {
+	case <-writer.copied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for fan-out input forwarding")
+	}
+
+	firstTimer <- now
+	select {
+	case code := <-result:
+		finished = true
+		if code != exitOK {
+			t.Fatalf("run status = %d, want %d; diagnostics = %q", code, exitOK, diagnostics.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for canonical event fan-out")
+	}
+	for range 2 {
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatal("fan-out condition monitor was not cleaned up")
+		}
 	}
 }
 
@@ -1748,7 +2060,7 @@ func TestProcessRejectsInvalidArgumentsWithoutReadingStdin(t *testing.T) {
 		args           []string
 		wantDiagnostic string
 	}{
-		{name: "missing event", args: nil},
+		{name: "missing condition", args: nil, wantDiagnostic: "missing condition argument"},
 		{name: "bare removed event option", args: []string{"--event"}, wantDiagnostic: "--event"},
 		{name: "removed event option form", args: []string{"--event", "signal:USR1"}, wantDiagnostic: "--event"},
 		{name: "unsupported value", args: []string{"signal:TERM"}},
@@ -1810,13 +2122,14 @@ func TestWindowsRejectsSignalEventsWithoutReadingStdin(t *testing.T) {
 	}
 
 	binary := buildOutage(t)
-	for _, event := range []string{
-		"signal:USR1",
-		"signal:SIGUSR1",
-		"signal:USR2",
-		"signal:SIGUSR2",
+	for _, args := range [][]string{
+		{"signal:USR1"},
+		{"signal:SIGUSR1"},
+		{"signal:USR2"},
+		{"signal:SIGUSR2"},
+		{"signal:USR1", "--or", "file:ready"},
 	} {
-		t.Run(event, func(t *testing.T) {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			inputPath := filepath.Join(t.TempDir(), "input")
 			if err := os.WriteFile(inputPath, []byte("must not be read"), 0o600); err != nil {
 				t.Fatal(err)
@@ -1827,15 +2140,15 @@ func TestWindowsRejectsSignalEventsWithoutReadingStdin(t *testing.T) {
 			}
 			defer input.Close()
 
-			result := runOutage(t, binary, []string{event}, input)
+			result := runOutage(t, binary, args, input)
 			if result.code != 2 {
-				t.Fatalf("exit code = %d, want 2; stdout = %q, stderr = %q", result.code, result.stdout, result.stderr)
+				t.Fatalf("args %v: exit code = %d, want 2; stdout = %q, stderr = %q", args, result.code, result.stdout, result.stderr)
 			}
 			if len(result.stdout) != 0 {
-				t.Fatalf("stdout = %q, want empty", result.stdout)
+				t.Fatalf("args %v: stdout = %q, want empty", args, result.stdout)
 			}
 			if len(result.stderr) == 0 {
-				t.Fatal("stderr is empty, want unsupported-event diagnostic")
+				t.Fatalf("args %v: stderr is empty, want unsupported-event diagnostic", args)
 			}
 			offset, err := input.Seek(0, io.SeekCurrent)
 			if err != nil {
