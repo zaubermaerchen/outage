@@ -2,17 +2,21 @@
 
 package main
 
-// This file makes the Unix-only event unavailable while keeping Windows builds valid.
+// This file rejects Unix-only signal conditions while keeping Windows builds valid.
 
-import "os"
+import (
+	"fmt"
+
+	"github.com/zaubermaerchen/outage/internal/condition"
+)
 
 func signalEventSupported() bool {
 	return false
 }
 
+func newSignalCondition(_ string, event string, _ ...condition.Option) (condition.Condition, error) {
+	return nil, fmt.Errorf("unsupported event %q on this platform", event)
+}
+
 // ignoreSIGPIPE is a no-op because Windows has no SIGPIPE signal.
 func ignoreSIGPIPE() {}
-
-func installSignalMonitor(string) (<-chan os.Signal, func()) {
-	return nil, func() {}
-}

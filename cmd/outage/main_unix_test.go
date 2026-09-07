@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -64,14 +65,65 @@ func sendUSR2(t *testing.T) {
 	}
 }
 
-func TestInstallSignalMonitorPanicsForUnexpectedEvent(t *testing.T) {
+func TestRunLatchesInitiallySatisfiedFileBeforeMonitoring(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ready")
+	if err := os.WriteFile(path, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, time.September, 3, 17, 0, 0, 0, time.UTC)
+	timer := make(chan time.Time, 1)
+	removed := make(chan struct{})
+	clock := runtimeClock{
+		now:      func() time.Time { return start },
+		location: time.UTC,
+		newTimer: func(time.Duration) (<-chan time.Time, func()) {
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("remove initially satisfied file: %v", err)
+			}
+			close(removed)
+			return timer, func() {}
+		},
+	}
+	reader := &blockingReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	var output, diagnostics bytes.Buffer
+	result := make(chan int, 1)
+	go func() {
+		result <- runWithClock([]string{
+			"duration:1h && file:" + path,
+		}, reader, &output, &diagnostics, clock)
+	}()
 	defer func() {
-		if recovered := recover(); recovered == nil {
-			t.Fatal("installSignalMonitor did not panic for an unexpected event")
+		close(reader.release)
+		select {
+		case <-reader.done:
+		case <-time.After(time.Second):
+			t.Error("blocked reader did not stop")
 		}
 	}()
 
-	installSignalMonitor("signal:TERM")
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("stdin copy did not start")
+	}
+	select {
+	case <-removed:
+	case <-time.After(time.Second):
+		t.Fatal("duration timer was not armed")
+	}
+	timer <- start.Add(time.Hour)
+	select {
+	case code := <-result:
+		if code != exitOK {
+			t.Fatalf("run status = %d, want %d; diagnostics = %q", code, exitOK, diagnostics.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("duration did not complete the initially satisfied file group")
+	}
 }
 
 func waitForResult(t *testing.T, result <-chan int) int {

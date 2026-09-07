@@ -1,11 +1,11 @@
 package main
 
-// This file parses datetime event values and monitors absolute deadlines.
+// This file parses CLI datetime values and defines the clock dependencies used
+// when translating them into typed condition values.
 
 import (
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -238,137 +238,4 @@ func earliestLocalInstant(parsed time.Time, year int, month time.Month, day, hou
 		current = end
 	}
 	return best
-}
-
-// startDeadlineMonitor arms the deadline timer synchronously and returns an
-// event channel plus an idempotent cleanup function. Re-arming handles dates
-// farther away than time.Duration can represent.
-func startDeadlineMonitor(deadline *time.Time, now func() time.Time, newTimer func(time.Duration) (<-chan time.Time, func())) (<-chan time.Time, func()) {
-	if deadline == nil {
-		return nil, nil
-	}
-	if now == nil {
-		now = time.Now
-	}
-	if newTimer == nil {
-		newTimer = defaultRuntimeClock().newTimer
-	}
-
-	current := now()
-	wait := deadline.Sub(current)
-	if wait <= 0 {
-		return nil, nil
-	}
-	// Parsing and setup can consume the remaining interval. Mirror dam's
-	// second sample so a deadline reached before timer creation is treated as
-	// immediately satisfied instead of arming an already-expired timer.
-	current = now()
-	wait = deadline.Sub(current)
-	if wait <= 0 {
-		return nil, nil
-	}
-	capped := !current.Add(wait).Equal(*deadline)
-	if capped {
-		wait = time.Duration(1<<63 - 1)
-	}
-	timerC, stopTimer := newTimer(wait)
-	if timerC == nil {
-		if stopTimer != nil {
-			stopTimer()
-		}
-		return nil, nil
-	}
-
-	state := &deadlineMonitorState{done: make(chan struct{})}
-	if !state.arm(stopTimer) {
-		return nil, nil
-	}
-	events := make(chan time.Time, 1)
-	go func() {
-		for {
-			select {
-			case fired, ok := <-timerC:
-				state.disarm()
-				if !ok {
-					return
-				}
-				if !capped {
-					events <- fired
-					return
-				}
-				current = now()
-				wait = deadline.Sub(current)
-				if wait <= 0 {
-					events <- fired
-					return
-				}
-				capped = !current.Add(wait).Equal(*deadline)
-				if capped {
-					wait = time.Duration(1<<63 - 1)
-				}
-				timerC, stopTimer = newTimer(wait)
-				if timerC == nil {
-					if stopTimer != nil {
-						stopTimer()
-					}
-					return
-				}
-				if !state.arm(stopTimer) {
-					return
-				}
-			case <-state.done:
-				state.disarm()
-				return
-			}
-		}
-	}()
-
-	return events, state.stop
-}
-
-type deadlineMonitorState struct {
-	done chan struct{}
-
-	stopOnce  sync.Once
-	mu        sync.Mutex
-	stopped   bool
-	stopTimer func()
-}
-
-func (state *deadlineMonitorState) arm(stopTimer func()) bool {
-	state.mu.Lock()
-	if state.stopped {
-		state.mu.Unlock()
-		if stopTimer != nil {
-			stopTimer()
-		}
-		return false
-	}
-	state.stopTimer = stopTimer
-	state.mu.Unlock()
-	return true
-}
-
-func (state *deadlineMonitorState) disarm() {
-	state.mu.Lock()
-	stopTimer := state.stopTimer
-	state.stopTimer = nil
-	state.mu.Unlock()
-	if stopTimer != nil {
-		stopTimer()
-	}
-}
-
-func (state *deadlineMonitorState) stop() {
-	state.stopOnce.Do(func() {
-		state.mu.Lock()
-		state.stopped = true
-		stopTimer := state.stopTimer
-		state.stopTimer = nil
-		state.mu.Unlock()
-		close(state.done)
-		if stopTimer != nil {
-			stopTimer()
-		}
-	})
 }

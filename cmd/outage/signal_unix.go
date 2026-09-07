@@ -2,35 +2,32 @@
 
 package main
 
-// This file installs the Unix USR1 or USR2 notification used to interrupt copying.
+// This file resolves Unix USR1 and USR2 values for typed condition monitors.
 
 import (
-	"os"
+	"fmt"
 	"os/signal"
 	"syscall"
+
+	"github.com/zaubermaerchen/outage/internal/condition"
 )
 
 func signalEventSupported() bool {
 	return true
 }
 
+func newSignalCondition(id, event string, options ...condition.Option) (condition.Condition, error) {
+	switch event {
+	case "signal:USR1", "signal:SIGUSR1":
+		return condition.NewSignal(id, syscall.SIGUSR1, options...), nil
+	case "signal:USR2", "signal:SIGUSR2":
+		return condition.NewSignal(id, syscall.SIGUSR2, options...), nil
+	default:
+		return nil, fmt.Errorf("unsupported event %q", event)
+	}
+}
+
 // ignoreSIGPIPE makes closed output pipes report EPIPE to Go writes.
 func ignoreSIGPIPE() {
 	signal.Ignore(syscall.SIGPIPE)
-}
-
-func installSignalMonitor(event string) (<-chan os.Signal, func()) {
-	signals := make(chan os.Signal, 1)
-	ignoreSIGPIPE()
-	switch event {
-	case "signal:USR1", "signal:SIGUSR1":
-		signal.Notify(signals, syscall.SIGUSR1)
-	case "signal:USR2", "signal:SIGUSR2":
-		signal.Notify(signals, syscall.SIGUSR2)
-	default:
-		panic("unexpected signal event")
-	}
-	return signals, func() {
-		signal.Stop(signals)
-	}
 }

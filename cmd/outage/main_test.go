@@ -521,6 +521,164 @@ func TestRunDurationEventExitsImmediatelyWithoutReadingStdin(t *testing.T) {
 	}
 }
 
+func TestRunRechecksConditionsBeforeStartingCopy(t *testing.T) {
+	start := time.Date(2026, time.September, 3, 17, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		arg  string
+	}{
+		{name: "duration", arg: "duration:1s"},
+		{name: "datetime", arg: "datetime:2026-09-03T17:00:01Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nowCalls := 0
+			clock := runtimeClock{
+				now: func() time.Time {
+					nowCalls++
+					if nowCalls <= 4 {
+						return start
+					}
+					return start.Add(time.Second)
+				},
+				location: time.UTC,
+				newTimer: func(time.Duration) (<-chan time.Time, func()) {
+					return make(chan time.Time), func() {}
+				},
+			}
+			var output, diagnostics bytes.Buffer
+			if status := runWithClock([]string{tc.arg}, unreadableReader{}, &output, &diagnostics, clock); status != exitOK {
+				t.Fatalf("run status = %d, want %d; diagnostics = %q", status, exitOK, diagnostics.String())
+			}
+		})
+	}
+}
+
+func TestRunInitialSatisfiedConditionDoesNotWaitForStaleFileEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ready")
+	if err := os.WriteFile(path, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, time.September, 3, 17, 0, 0, 0, time.UTC)
+	deadline := start.Add(time.Hour)
+	nowCalls := 0
+	removed := false
+	stopped := make(chan struct{}, 1)
+	clock := runtimeClock{
+		now: func() time.Time {
+			nowCalls++
+			if nowCalls == 2 && !removed {
+				removed = true
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove stale file: %v", err)
+				}
+			}
+			return start
+		},
+		location: time.UTC,
+		newTimer: func(time.Duration) (<-chan time.Time, func()) {
+			return make(chan time.Time), func() { stopped <- struct{}{} }
+		},
+	}
+	result := make(chan int, 1)
+	go func() {
+		result <- runWithClock([]string{
+			"file:" + path,
+			"--or", "datetime:" + deadline.Format(time.RFC3339),
+		}, unreadableReader{}, io.Discard, io.Discard, clock)
+	}()
+	select {
+	case status := <-result:
+		if status != exitOK {
+			t.Fatalf("run status = %d, want %d", status, exitOK)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("run waited for a stale file event")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("alternative datetime timer was not cleaned up")
+	}
+}
+
+func TestRunSetupRecheckIgnoresTransientFileStatErrors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory replacement is not portable on Windows")
+	}
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	target := filepath.Join(parent, "trigger")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, time.September, 3, 17, 0, 0, 0, time.UTC)
+	changed := make(chan struct{})
+	clock := runtimeClock{
+		now:      func() time.Time { return start },
+		location: time.UTC,
+		newTimer: func(time.Duration) (<-chan time.Time, func()) {
+			if err := os.Remove(parent); err != nil {
+				t.Fatalf("remove parent directory: %v", err)
+			}
+			if err := os.WriteFile(parent, []byte("temporary file"), 0o600); err != nil {
+				t.Fatalf("replace parent directory: %v", err)
+			}
+			close(changed)
+			return make(chan time.Time), func() {}
+		},
+	}
+	reader := &fileEventReader{
+		payload: []byte("input before transient setup error"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	writer := &fileEventWriter{copied: make(chan struct{})}
+	var diagnostics bytes.Buffer
+	result := make(chan int, 1)
+	go func() {
+		result <- runWithClock([]string{
+			"file:" + target,
+			"--or", "duration:1h",
+		}, reader, writer, &diagnostics, clock)
+	}()
+	select {
+	case <-changed:
+	case <-time.After(time.Second):
+		t.Fatal("duration timer was not armed")
+	}
+	select {
+	case <-reader.started:
+	case status := <-result:
+		t.Fatalf("run exited during transient stat error with status %d; diagnostics = %q", status, diagnostics.String())
+	case <-time.After(time.Second):
+		t.Fatal("stdin copy did not start after setup stat error")
+	}
+	if err := os.Remove(parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("trigger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case status := <-result:
+		if status != exitOK {
+			t.Fatalf("run status = %d, want %d; diagnostics = %q", status, exitOK, diagnostics.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("file condition did not recover from transient stat error")
+	}
+	close(reader.release)
+	select {
+	case <-reader.done:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not clean up")
+	}
+}
+
 func TestValidateDurationEventAcceptsGoDurationSyntax(t *testing.T) {
 	for _, event := range []string{"duration:30s", "duration:500ms", "duration:1m30s"} {
 		t.Run(event, func(t *testing.T) {
