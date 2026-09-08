@@ -199,5 +199,5 @@ jobs:
           gh release create "$VERSION" \
             --verify-tag \
             --title "$VERSION" \
-            --notes "Release $VERSION." \
+            --generate-notes \
             "${archives[@]}" SHA256SUMS
