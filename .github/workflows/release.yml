@@ -41,34 +41,48 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
+            archive_arch: amd64
             archive_format: tar.gz
             binary_suffix: ''
           - goos: linux
             goarch: arm64
+            archive_arch: arm64
+            archive_format: tar.gz
+            binary_suffix: ''
+          - goos: linux
+            goarch: arm
+            goarm: 6
+            archive_arch: armv6
             archive_format: tar.gz
             binary_suffix: ''
           - goos: darwin
             goarch: amd64
+            archive_arch: amd64
             archive_format: tar.gz
             binary_suffix: ''
           - goos: darwin
             goarch: arm64
+            archive_arch: arm64
             archive_format: tar.gz
             binary_suffix: ''
           - goos: windows
             goarch: amd64
+            archive_arch: amd64
             archive_format: zip
             binary_suffix: .exe
           - goos: windows
             goarch: arm64
+            archive_arch: arm64
             archive_format: zip
             binary_suffix: .exe
     runs-on: ubuntu-latest
     env:
       GOOS: ${{ matrix.goos }}
       GOARCH: ${{ matrix.goarch }}
+      GOARM: ${{ matrix.goarm }}
       CGO_ENABLED: '0'
       VERSION: ${{ github.ref_name }}
+      ARCHIVE_ARCH: ${{ matrix.archive_arch }}
       ARCHIVE_FORMAT: ${{ matrix.archive_format }}
       BINARY_SUFFIX: ${{ matrix.binary_suffix }}
     steps:
@@ -95,9 +109,9 @@ jobs:
           release_dir="release"
           staging_root="staging"
           binary_path="${build_dir}/outage${BINARY_SUFFIX}"
-          archive_name="outage-${VERSION}-${GOOS}-${GOARCH}.${ARCHIVE_FORMAT}"
+          archive_name="outage-${VERSION}-${GOOS}-${ARCHIVE_ARCH}.${ARCHIVE_FORMAT}"
           archive_path="${release_dir}/${archive_name}"
-          package_dir="outage-${VERSION}-${GOOS}-${GOARCH}"
+          package_dir="outage-${VERSION}-${GOOS}-${ARCHIVE_ARCH}"
           package_root="${staging_root}/${package_dir}"
 
           mkdir -p "$build_dir" "$release_dir" "$package_root"
@@ -141,8 +155,8 @@ jobs:
       - name: Upload archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: release/outage-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
+          name: release-${{ matrix.goos }}-${{ matrix.archive_arch }}
+          path: release/outage-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.archive_arch }}.${{ matrix.archive_format }}
           if-no-files-found: error
           retention-days: 1
 
@@ -168,7 +182,7 @@ jobs:
           set -euo pipefail
           cd dist
           mapfile -t archives < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | LC_ALL=C sort)
-          test "${#archives[@]}" -eq 6
+          test "${#archives[@]}" -eq 7
           sha256sum "${archives[@]}" > SHA256SUMS
           sha256sum --check SHA256SUMS
 
@@ -181,7 +195,7 @@ jobs:
           set -euo pipefail
           cd dist
           mapfile -t archives < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | LC_ALL=C sort)
-          test "${#archives[@]}" -eq 6
+          test "${#archives[@]}" -eq 7
           gh release create "$VERSION" \
             --verify-tag \
             --title "$VERSION" \
