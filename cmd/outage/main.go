@@ -5,13 +5,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
+	"github.com/zaubermaerchen/outage/internal/cli"
 	"github.com/zaubermaerchen/outage/internal/condition"
 )
 
@@ -86,10 +85,7 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 	clock = clock.normalized()
 	startedAt := clock.now()
 
-	for _, arg := range args {
-		if arg != "-h" && arg != "--help" {
-			continue
-		}
+	if cli.HelpRequested(args) {
 		ignoreSIGPIPE()
 		if _, err := fmt.Fprint(out, helpText); err != nil {
 			writeDiagnostic(errOut, err)
@@ -98,7 +94,7 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		return exitOK
 	}
 
-	if len(args) == 1 && args[0] == "--version" {
+	if cli.VersionRequested(args) {
 		ignoreSIGPIPE()
 		if _, err := fmt.Fprintf(out, "outage %s\n", version); err != nil {
 			writeDiagnostic(errOut, err)
@@ -107,17 +103,7 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		return exitOK
 	}
 
-	if err := validateArgsAt(args, clock.location); err != nil {
-		writeDiagnostic(errOut, err)
-		return exitArgError
-	}
-
-	groups, err := parseConditionGroups(args)
-	if err != nil {
-		writeDiagnostic(errOut, err)
-		return exitArgError
-	}
-	plan, err := canonicalConditionPlan(groups, clock.location)
+	plan, err := cli.Parse(args, clock.location)
 	if err != nil {
 		writeDiagnostic(errOut, err)
 		return exitArgError
@@ -186,7 +172,7 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 	}
 }
 
-func initialConditionSatisfaction(plan conditionPlan, startedAt time.Time, clock runtimeClock, checkFiles bool) (bool, error) {
+func initialConditionSatisfaction(plan cli.Plan, startedAt time.Time, clock runtimeClock, checkFiles bool) (bool, error) {
 	satisfied, err := initialConditionStates(plan, startedAt, clock, checkFiles)
 	if err != nil {
 		return false, err
@@ -194,15 +180,15 @@ func initialConditionSatisfaction(plan conditionPlan, startedAt time.Time, clock
 	return conditionPlanSatisfied(plan, satisfied), nil
 }
 
-func initialConditionStates(plan conditionPlan, startedAt time.Time, clock runtimeClock, checkFiles bool) ([]bool, error) {
-	satisfied := make([]bool, len(plan.conditions))
-	for index, raw := range plan.conditions {
-		if strings.HasPrefix(raw, "file:") && !checkFiles {
+func initialConditionStates(plan cli.Plan, startedAt time.Time, clock runtimeClock, checkFiles bool) ([]bool, error) {
+	satisfied := make([]bool, len(plan.Conditions))
+	for index, spec := range plan.Conditions {
+		if spec.Kind == cli.FileKind && !checkFiles {
 			satisfied[index] = false
 			continue
 		}
 		var err error
-		satisfied[index], err = conditionAlreadySatisfied(raw, startedAt, clock)
+		satisfied[index], err = conditionAlreadySatisfied(spec, startedAt, clock)
 		if err != nil {
 			return nil, err
 		}
@@ -210,8 +196,8 @@ func initialConditionStates(plan conditionPlan, startedAt time.Time, clock runti
 	return satisfied, nil
 }
 
-func conditionPlanSatisfied(plan conditionPlan, satisfied []bool) bool {
-	for _, group := range plan.groups {
+func conditionPlanSatisfied(plan cli.Plan, satisfied []bool) bool {
+	for _, group := range plan.Groups {
 		complete := true
 		for _, index := range group {
 			if !satisfied[index] {
@@ -226,23 +212,14 @@ func conditionPlanSatisfied(plan conditionPlan, satisfied []bool) bool {
 	return false
 }
 
-func conditionAlreadySatisfied(raw string, startedAt time.Time, clock runtimeClock) (bool, error) {
-	if strings.HasPrefix(raw, "duration:") {
-		duration, err := parseDurationEvent(raw)
-		if err != nil {
-			return false, err
-		}
-		return duration <= 0 || clock.now().Sub(startedAt) >= duration, nil
-	}
-	if strings.HasPrefix(raw, "datetime:") {
-		deadline, err := parseDatetimeEvent(raw, clock.location)
-		if err != nil {
-			return false, err
-		}
-		return !deadline.After(clock.now()), nil
-	}
-	if strings.HasPrefix(raw, "file:") {
-		regular, err := isRegularFile(strings.TrimPrefix(raw, "file:"))
+func conditionAlreadySatisfied(spec cli.ConditionSpec, startedAt time.Time, clock runtimeClock) (bool, error) {
+	switch spec.Kind {
+	case cli.DurationKind:
+		return spec.Duration <= 0 || clock.now().Sub(startedAt) >= spec.Duration, nil
+	case cli.DateTimeKind:
+		return !spec.Deadline.After(clock.now()), nil
+	case cli.FileKind:
+		regular, err := isRegularFile(spec.Path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return false, nil
@@ -254,7 +231,7 @@ func conditionAlreadySatisfied(raw string, startedAt time.Time, clock runtimeClo
 	return false, nil
 }
 
-func buildConditionTree(plan conditionPlan, startedAt time.Time, clock runtimeClock, initialSatisfied []bool) (condition.Condition, error) {
+func buildConditionTree(plan cli.Plan, startedAt time.Time, clock runtimeClock, initialSatisfied []bool) (condition.Condition, error) {
 	runtime := condition.Runtime{
 		Now:          clock.now,
 		NewTimer:     clock.newTimer,
@@ -264,13 +241,9 @@ func buildConditionTree(plan conditionPlan, startedAt time.Time, clock runtimeCl
 		condition.WithRuntime(runtime),
 		condition.WithStartTime(startedAt),
 	}
-	leaves := make([]condition.Condition, len(plan.conditions))
-	for index, raw := range plan.conditions {
-		identity, err := canonicalConditionIdentity(raw, clock.location)
-		if err != nil {
-			return nil, err
-		}
-		id := conditionIdentityID(identity)
+	leaves := make([]condition.Condition, len(plan.Conditions))
+	for index, spec := range plan.Conditions {
+		id := spec.ID
 		if initialSatisfied[index] {
 			// Initial observations are latched before monitors start; represent
 			// them as a typed one-shot leaf so a source changing during setup
@@ -278,32 +251,20 @@ func buildConditionTree(plan conditionPlan, startedAt time.Time, clock runtimeCl
 			leaves[index] = condition.NewDuration(id, 0, condition.WithRuntime(runtime))
 			continue
 		}
-		switch identity.kind {
-		case "duration":
-			duration, err := parseDurationEvent(raw)
-			if err != nil {
-				return nil, err
-			}
-			leaves[index] = condition.NewDuration(id, duration, options...)
-		case "datetime":
-			deadline, err := parseDatetimeEvent(raw, clock.location)
-			if err != nil {
-				return nil, err
-			}
-			leaves[index] = condition.NewDateTime(id, deadline, options...)
-		case "file":
-			path := strings.TrimPrefix(raw, "file:")
-			leaves[index] = condition.NewFile(id, path, options...)
-		case "signal":
-			leaves[index], err = newSignalCondition(id, raw, options...)
-			if err != nil {
-				return nil, err
-			}
+		switch spec.Kind {
+		case cli.DurationKind:
+			leaves[index] = condition.NewDuration(id, spec.Duration, options...)
+		case cli.DateTimeKind:
+			leaves[index] = condition.NewDateTime(id, spec.Deadline, options...)
+		case cli.FileKind:
+			leaves[index] = condition.NewFile(id, spec.Path, options...)
+		case cli.SignalKind:
+			leaves[index] = condition.NewSignal(id, spec.Signal, options...)
 		}
 	}
 
-	groups := make([]condition.Condition, 0, len(plan.groups))
-	for index, members := range plan.groups {
+	groups := make([]condition.Condition, 0, len(plan.Groups))
+	for index, members := range plan.Groups {
 		children := make([]condition.Condition, 0, len(members))
 		for _, member := range members {
 			children = append(children, leaves[member])
@@ -318,246 +279,6 @@ func buildConditionTree(plan conditionPlan, startedAt time.Time, clock runtimeCl
 		return groups[0], nil
 	}
 	return condition.Or("or:root", groups...), nil
-}
-
-func conditionIdentityID(identity conditionIdentity) string {
-	return identity.kind + ":" + identity.value
-}
-
-type conditionIdentity struct {
-	kind  string
-	value string
-}
-
-type conditionGroup struct {
-	members []string
-}
-
-type conditionPlan struct {
-	conditions []string
-	groups     [][]int
-}
-
-func parseConditionGroups(args []string) ([]conditionGroup, error) {
-	values, err := parseConditionArguments(args)
-	if err != nil {
-		return nil, err
-	}
-	groups := make([]conditionGroup, 0, len(values))
-	for _, value := range values {
-		groups = append(groups, conditionGroup{
-			members: strings.Split(value, " && "),
-		})
-	}
-	return groups, nil
-}
-
-func parseConditionArguments(args []string) ([]string, error) {
-	if len(args) == 0 {
-		return nil, errors.New("missing condition argument")
-	}
-
-	values := make([]string, 0, len(args))
-	hasCondition := false
-	pendingOR := false
-	for _, arg := range args {
-		switch {
-		case arg == "--or":
-			if !hasCondition {
-				return nil, errors.New("--or requires a preceding condition")
-			}
-			if pendingOR {
-				return nil, errors.New("--or requires a condition")
-			}
-			pendingOR = true
-		case strings.HasPrefix(arg, "--or="):
-			if !hasCondition {
-				return nil, errors.New("--or requires a preceding condition")
-			}
-			if pendingOR {
-				return nil, errors.New("--or requires a condition")
-			}
-			value := strings.TrimPrefix(arg, "--or=")
-			if value == "" {
-				return nil, errors.New("--or requires a condition")
-			}
-			values = append(values, value)
-		case strings.HasPrefix(arg, "-"):
-			if pendingOR {
-				return nil, errors.New("--or requires a condition")
-			}
-			return nil, fmt.Errorf("unexpected argument %q", arg)
-		default:
-			if !hasCondition {
-				values = append(values, arg)
-				hasCondition = true
-				continue
-			}
-			if !pendingOR {
-				return nil, fmt.Errorf("unexpected argument %q", arg)
-			}
-			values = append(values, arg)
-			pendingOR = false
-		}
-	}
-	if pendingOR {
-		return nil, errors.New("--or requires a condition")
-	}
-	return values, nil
-}
-
-func canonicalConditionPlan(groups []conditionGroup, location *time.Location) (conditionPlan, error) {
-	plan := conditionPlan{
-		conditions: make([]string, 0),
-		groups:     make([][]int, 0, len(groups)),
-	}
-	conditionIndexes := make(map[conditionIdentity]int)
-	for _, group := range groups {
-		members := group.members
-		groupIndexes := make([]int, 0, len(members))
-		seen := make(map[conditionIdentity]struct{}, len(members))
-		for _, condition := range members {
-			identity, err := canonicalConditionIdentity(condition, location)
-			if err != nil {
-				return conditionPlan{}, err
-			}
-			if _, exists := seen[identity]; exists {
-				continue
-			}
-			seen[identity] = struct{}{}
-			index, exists := conditionIndexes[identity]
-			if !exists {
-				index = len(plan.conditions)
-				conditionIndexes[identity] = index
-				plan.conditions = append(plan.conditions, condition)
-			}
-			groupIndexes = append(groupIndexes, index)
-		}
-		plan.groups = append(plan.groups, groupIndexes)
-	}
-	return plan, nil
-}
-
-func canonicalConditionIdentity(condition string, location *time.Location) (conditionIdentity, error) {
-	if strings.HasPrefix(condition, "duration:") {
-		duration, err := parseDurationEvent(condition)
-		if err != nil {
-			return conditionIdentity{}, err
-		}
-		return conditionIdentity{kind: "duration", value: fmt.Sprintf("%d", duration)}, nil
-	}
-	if strings.HasPrefix(condition, "datetime:") {
-		deadline, err := parseDatetimeEvent(condition, location)
-		if err != nil {
-			return conditionIdentity{}, err
-		}
-		return conditionIdentity{kind: "datetime", value: deadline.UTC().Format(time.RFC3339)}, nil
-	}
-	if strings.HasPrefix(condition, "file:") {
-		return conditionIdentity{kind: "file", value: strings.TrimPrefix(condition, "file:")}, nil
-	}
-	if signal, ok := canonicalSignalName(condition); ok {
-		return conditionIdentity{kind: "signal", value: signal}, nil
-	}
-	return conditionIdentity{kind: "signal", value: condition}, nil
-}
-
-func validateArgs(args []string) error {
-	return validateArgsAt(args, time.Local)
-}
-
-func validateArgsAt(args []string, location *time.Location) error {
-	return validateArgsAtWithSignalSupport(args, location, signalEventSupported)
-}
-
-// validateArgsAtWithSignalSupport keeps syntax errors ahead of platform
-// capability errors. This ensures a malformed later member is diagnosed even
-// when an earlier signal is unsupported on the current platform.
-func validateArgsAtWithSignalSupport(args []string, location *time.Location, signalSupported func() bool) error {
-	groups, err := parseConditionGroups(args)
-	if err != nil {
-		return err
-	}
-	for _, group := range groups {
-		for _, condition := range group.members {
-			if err := validateConditionSyntaxAt(condition, location); err != nil {
-				return err
-			}
-		}
-	}
-	for _, group := range groups {
-		for _, condition := range group.members {
-			if err := validateConditionCapabilityAt(condition, signalSupported); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func validateConditionSyntaxAt(event string, location *time.Location) error {
-	if strings.HasPrefix(event, "duration:") {
-		_, err := parseDurationEvent(event)
-		return err
-	}
-	if strings.HasPrefix(event, "datetime:") {
-		_, err := parseDatetimeEvent(event, location)
-		return err
-	}
-	if strings.HasPrefix(event, "file:") {
-		if strings.TrimPrefix(event, "file:") == "" {
-			return fmt.Errorf("invalid file event %q", event)
-		}
-		return nil
-	}
-
-	if !isSignalEvent(event) {
-		return fmt.Errorf("unsupported event %q", event)
-	}
-
-	return nil
-}
-
-func validateConditionCapabilityAt(event string, signalSupported func() bool) error {
-	if !isSignalEvent(event) {
-		return nil
-	}
-	if signalSupported == nil {
-		signalSupported = signalEventSupported
-	}
-	if !signalSupported() {
-		return fmt.Errorf("unsupported event %q on this platform", event)
-	}
-
-	return nil
-}
-
-func isSignalEvent(event string) bool {
-	_, ok := canonicalSignalName(event)
-	return ok
-}
-
-func canonicalSignalName(event string) (string, bool) {
-	switch event {
-	case "signal:USR1", "signal:SIGUSR1":
-		return "USR1", true
-	case "signal:USR2", "signal:SIGUSR2":
-		return "USR2", true
-	default:
-		return "", false
-	}
-}
-
-func parseDurationEvent(event string) (time.Duration, error) {
-	value := strings.TrimPrefix(event, "duration:")
-	if strings.HasPrefix(value, "-") {
-		return 0, fmt.Errorf("invalid duration %q: duration must not be negative", event)
-	}
-	duration, err := time.ParseDuration(value)
-	if err != nil {
-		return 0, fmt.Errorf("invalid duration %q: %w", event, err)
-	}
-	return duration, nil
 }
 
 func writeDiagnostic(errOut io.Writer, err error) {

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zaubermaerchen/outage/internal/cli"
 )
 
 func buildOutage(t *testing.T) string {
@@ -682,16 +684,16 @@ func TestRunSetupRecheckIgnoresTransientFileStatErrors(t *testing.T) {
 func TestValidateDurationEventAcceptsGoDurationSyntax(t *testing.T) {
 	for _, event := range []string{"duration:30s", "duration:500ms", "duration:1m30s"} {
 		t.Run(event, func(t *testing.T) {
-			if err := validateArgs([]string{event}); err != nil {
-				t.Fatalf("validateArgs(%q) = %v, want nil", event, err)
+			if _, err := cli.Parse([]string{event}, time.Local); err != nil {
+				t.Fatalf("cli.Parse(%q) = %v, want nil", event, err)
 			}
 		})
 	}
 }
 
 func TestValidateAndConditionsRequireExactSeparatorAndPreserveOperands(t *testing.T) {
-	if err := validateArgs([]string{"duration:1s && duration:2s"}); err != nil {
-		t.Fatalf("validateArgs(exact AND expression) = %v, want nil", err)
+	if _, err := cli.Parse([]string{"duration:1s && duration:2s"}, time.Local); err != nil {
+		t.Fatalf("cli.Parse(exact AND expression) = %v, want nil", err)
 	}
 
 	for _, tc := range []struct {
@@ -758,38 +760,14 @@ func TestRunRejectsEmptyAndConditionMembersWithoutReadingStdin(t *testing.T) {
 	}
 }
 
-func TestValidateConditionsCheckAllSyntaxBeforePlatformCapability(t *testing.T) {
-	signalUnsupported := func() bool { return false }
-	for _, tc := range []struct {
-		name           string
-		event          string
-		wantDiagnostic string
-	}{
-		{name: "trailing empty member", event: "signal:USR1 && ", wantDiagnostic: `""`},
-		{name: "consecutive empty member", event: "signal:USR1 &&  && signal:USR2", wantDiagnostic: `""`},
-		{name: "first malformed member", event: "signal:TERM && signal:USR1", wantDiagnostic: `"signal:TERM"`},
-		{name: "capability checked after syntax", event: "signal:USR1 && signal:USR2", wantDiagnostic: `"signal:USR1"`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := validateArgsAtWithSignalSupport([]string{tc.event}, time.UTC, signalUnsupported)
-			if err == nil {
-				t.Fatalf("validateArgsAtWithSignalSupport(%q) = nil, want error", tc.event)
-			}
-			if !strings.Contains(err.Error(), tc.wantDiagnostic) {
-				t.Fatalf("error = %q, want diagnostic containing %q", err, tc.wantDiagnostic)
-			}
-		})
-	}
-}
-
 func TestValidateORConditionsAcceptSeparateAndEqualsForms(t *testing.T) {
 	for _, args := range [][]string{
 		{"duration:1s", "--or", "duration:2s"},
 		{"duration:1s", "--or=duration:2s"},
 		{"duration:1s && file:one", "--or", "duration:2s && file:two"},
 	} {
-		if err := validateArgs(args); err != nil {
-			t.Fatalf("validateArgs(%q) = %v, want nil", args, err)
+		if _, err := cli.Parse(args, time.Local); err != nil {
+			t.Fatalf("cli.Parse(%q) = %v, want nil", args, err)
 		}
 	}
 }
@@ -803,24 +781,9 @@ func TestValidateORConditionsRejectMalformedComposition(t *testing.T) {
 		{"duration:1s", "--or", "--or", "duration:2s"},
 		{"duration:1s", "duration:2s"},
 	} {
-		if err := validateArgs(args); err == nil {
-			t.Fatalf("validateArgs(%q) = nil, want error", args)
+		if _, err := cli.Parse(args, time.Local); err == nil {
+			t.Fatalf("cli.Parse(%q) = nil, want error", args)
 		}
-	}
-}
-
-func TestValidateORGroupsCheckAllSyntaxBeforePlatformCapability(t *testing.T) {
-	signalUnsupported := func() bool { return false }
-	err := validateArgsAtWithSignalSupport(
-		[]string{"signal:USR1", "--or", "signal:USR2 && "},
-		time.UTC,
-		signalUnsupported,
-	)
-	if err == nil {
-		t.Fatal("validateArgsAtWithSignalSupport unexpectedly accepted malformed OR group")
-	}
-	if !strings.Contains(err.Error(), `unsupported event ""`) {
-		t.Fatalf("error = %q, want malformed member diagnostic before signal capability", err)
 	}
 }
 
