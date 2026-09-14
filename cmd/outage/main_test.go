@@ -203,6 +203,11 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 		"Usage: outage CONDITION [--or CONDITION]...",
 		"--or CONDITION",
 		"--or=CONDITION",
+		"--events-fd N",
+		"--events-fd=N",
+		"JSONL",
+		"condition-triggered",
+		"stream-cutoff",
 		"RFC3339",
 		"Arguments:",
 		"Options:",
@@ -221,7 +226,7 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 			t.Errorf("help = %q, want substring %q", stdout.String(), want)
 		}
 	}
-	if strings.Contains(stdout.String(), "--event") {
+	if strings.Contains(stdout.String(), "--event ") || strings.Contains(stdout.String(), "--event=") {
 		t.Fatalf("help = %q, must not document removed --event option", stdout.String())
 	}
 }

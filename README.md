@@ -117,6 +117,29 @@ USR2 has the same termination semantics.
 Diagnostics are written to stderr. Stdin or stdout I/O errors exit with status
 1; invalid normal-operation arguments exit with status 2.
 
+For machine-readable lifecycle observations, pass an inherited file descriptor
+with `--events-fd N` (or `--events-fd=N`), where `N` is at least 3:
+
+```sh
+producer | outage --events-fd 3 duration:30s 3>events.jsonl | consumer
+```
+
+The `3>events.jsonl` redirection opens and inherits FD 3 for `outage`.
+
+The descriptor receives JSONL records containing only `event` and an observation
+`timestamp` in UTC RFC3339Nano format. When a condition causes the cutoff, the
+records are emitted in this order:
+
+```json
+{"event":"condition-triggered","timestamp":"2026-09-14T12:00:00Z"}
+{"event":"stream-cutoff","timestamp":"2026-09-14T12:00:00Z"}
+```
+
+Event output is optional and does not change the stdin-to-stdout data path. If
+the descriptor cannot accept an event, outage warns once on stderr, disables
+further event output, and continues normal processing. The descriptor remains
+owned by the caller.
+
 ## Guarantee boundary
 
 `outage` does not discover the producer or send it SIGPIPE or any other signal.
@@ -144,6 +167,7 @@ and the producer. Stopping the producer itself is not guaranteed.
 - `-h` and `--help` display help. A help token has highest priority wherever it
   appears in the argument list, even alongside invalid arguments or `--version`.
 - Standalone `--version` prints the version.
+- `--events-fd N` (or `--events-fd=N`) enables JSONL condition lifecycle events on inherited file descriptor `N`; `N` must be at least 3 and the option may be specified only once.
 
 ## Platform support
 

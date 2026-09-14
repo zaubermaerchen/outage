@@ -66,6 +66,10 @@ Arguments:
 Options:
   --or CONDITION            Use CONDITION as an alternative group. May be
                             written as --or=CONDITION.
+  --events-fd N             Write condition lifecycle events as JSONL to FD N.
+                             May be written as --events-fd=N; N must be at least 3.
+                             Condition shutdown emits condition-triggered then
+                             stream-cutoff.
   --version                 Print the version (standalone).
   -h, --help                Show this help.
 Help options take priority over every other argument.
@@ -108,6 +112,11 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		writeDiagnostic(errOut, err)
 		return exitArgError
 	}
+	var emitter *eventEmitter
+	if plan.EventsFDSet {
+		emitter = newEventEmitterWithClock(plan.EventsFD, errOut, clock.now)
+		defer emitter.close()
+	}
 	initialSatisfied, err := initialConditionStates(plan, startedAt, clock, true)
 	if err != nil {
 		writeDiagnostic(errOut, err)
@@ -126,6 +135,7 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 	if satisfied {
 		// Start every monitor before returning so alternative timers and signal
 		// subscriptions are cleaned up by the deferred context cancellation.
+		emitCutoffEvents(emitter)
 		return exitOK
 	}
 	// Parsing and monitor setup can consume enough time for a deadline or
@@ -135,6 +145,7 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 	select {
 	case _, ok := <-events:
 		if ok {
+			emitCutoffEvents(emitter)
 			return exitOK
 		}
 		return exitOK
@@ -146,6 +157,7 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		return exitArgError
 	}
 	if satisfied {
+		emitCutoffEvents(emitter)
 		return exitOK
 	}
 
@@ -155,21 +167,72 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		copyDone <- err
 	}()
 
-	for {
-		select {
-		case _, ok := <-events:
-			if !ok {
+	return waitForCopyOrCondition(events, copyDone, emitter, errOut)
+}
+
+// waitForCopyOrCondition retains the original channel arbitration when event
+// output is disabled. With event output enabled, it checks terminal input
+// completion before selecting a condition event so copy/EOF outcomes are not
+// suppressed when both channels become ready at the same time.
+func waitForCopyOrCondition(events <-chan condition.Event, copyDone <-chan error, emitter *eventEmitter, errOut io.Writer) int {
+	if emitter == nil {
+		for {
+			select {
+			case _, ok := <-events:
+				if !ok {
+					return exitOK
+				}
+				return exitOK
+			case err := <-copyDone:
+				if err != nil {
+					writeDiagnostic(errOut, err)
+					return exitCopyError
+				}
 				return exitOK
 			}
-			return exitOK
-		case err := <-copyDone:
-			if err != nil {
-				writeDiagnostic(errOut, err)
-				return exitCopyError
-			}
-			return exitOK
 		}
 	}
+
+	select {
+	case err := <-copyDone:
+		if err != nil {
+			writeDiagnostic(errOut, err)
+			return exitCopyError
+		}
+		return exitOK
+	default:
+	}
+
+	select {
+	case _, ok := <-events:
+		return handleConditionEvent(ok, copyDone, emitter, errOut)
+	case err := <-copyDone:
+		if err != nil {
+			writeDiagnostic(errOut, err)
+			return exitCopyError
+		}
+		return exitOK
+	}
+}
+
+func handleConditionEvent(open bool, copyDone <-chan error, emitter *eventEmitter, errOut io.Writer) int {
+	// A copy result may become ready while the condition event is being
+	// selected. Check it before treating the event as a cutoff, including when
+	// the condition stream has closed without an event.
+	select {
+	case err := <-copyDone:
+		if err != nil {
+			writeDiagnostic(errOut, err)
+			return exitCopyError
+		}
+		return exitOK
+	default:
+	}
+	if !open {
+		return exitOK
+	}
+	emitCutoffEvents(emitter)
+	return exitOK
 }
 
 func initialConditionSatisfaction(plan cli.Plan, startedAt time.Time, clock runtimeClock, checkFiles bool) (bool, error) {

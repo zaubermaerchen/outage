@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -42,8 +43,10 @@ type ConditionSpec struct {
 // arguments. Groups contain indexes into Conditions and are OR alternatives;
 // members within each group are AND requirements.
 type Plan struct {
-	Conditions []ConditionSpec
-	Groups     [][]int
+	Conditions  []ConditionSpec
+	Groups      [][]int
+	EventsFD    int
+	EventsFDSet bool
 }
 
 // HelpRequested reports whether the command-line invocation contains either
@@ -71,7 +74,11 @@ func Parse(args []string, location *time.Location) (Plan, error) {
 }
 
 func parseWithSignalSupport(args []string, location *time.Location, supported func() bool) (Plan, error) {
-	groups, err := parseConditionGroups(args)
+	conditionArgs, eventsFD, eventsFDSet, err := parseEventsFDOptions(args)
+	if err != nil {
+		return Plan{}, err
+	}
+	groups, err := parseConditionGroups(conditionArgs)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -89,7 +96,61 @@ func parseWithSignalSupport(args []string, location *time.Location, supported fu
 			}
 		}
 	}
-	return canonicalPlan(groups, location)
+	plan, err := canonicalPlan(groups, location)
+	if err != nil {
+		return Plan{}, err
+	}
+	plan.EventsFD = eventsFD
+	plan.EventsFDSet = eventsFDSet
+	return plan, nil
+}
+
+func parseEventsFDOptions(args []string) ([]string, int, bool, error) {
+	conditionArgs := make([]string, 0, len(args))
+	eventsFD := 0
+	eventsFDSet := false
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--events-fd":
+			if eventsFDSet {
+				return nil, 0, false, errors.New("--events-fd specified more than once")
+			}
+			valueIndex := index + 1
+			if valueIndex >= len(args) || strings.HasPrefix(args[valueIndex], "--") {
+				return nil, 0, false, errors.New("missing value for --events-fd")
+			}
+			value, err := parseEventsFD(args[valueIndex])
+			if err != nil {
+				return nil, 0, false, err
+			}
+			eventsFD, eventsFDSet = value, true
+			index = valueIndex
+		case strings.HasPrefix(arg, "--events-fd="):
+			if eventsFDSet {
+				return nil, 0, false, errors.New("--events-fd specified more than once")
+			}
+			value, err := parseEventsFD(strings.TrimPrefix(arg, "--events-fd="))
+			if err != nil {
+				return nil, 0, false, err
+			}
+			eventsFD, eventsFDSet = value, true
+		default:
+			conditionArgs = append(conditionArgs, arg)
+		}
+	}
+	return conditionArgs, eventsFD, eventsFDSet, nil
+}
+
+func parseEventsFD(value string) (int, error) {
+	fd, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid file descriptor for --events-fd: %w", err)
+	}
+	if fd < 3 {
+		return 0, errors.New("--events-fd must be at least 3")
+	}
+	return fd, nil
 }
 
 type conditionGroup struct {
