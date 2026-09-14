@@ -170,10 +170,29 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 	return waitForCopyOrCondition(events, copyDone, emitter, errOut)
 }
 
-// waitForCopyOrCondition checks terminal input completion before selecting a
-// condition event. This preserves copy/EOF outcomes when both channels become
-// ready at the same time.
+// waitForCopyOrCondition retains the original channel arbitration when event
+// output is disabled. With event output enabled, it checks terminal input
+// completion before selecting a condition event so copy/EOF outcomes are not
+// suppressed when both channels become ready at the same time.
 func waitForCopyOrCondition(events <-chan condition.Event, copyDone <-chan error, emitter *eventEmitter, errOut io.Writer) int {
+	if emitter == nil {
+		for {
+			select {
+			case _, ok := <-events:
+				if !ok {
+					return exitOK
+				}
+				return exitOK
+			case err := <-copyDone:
+				if err != nil {
+					writeDiagnostic(errOut, err)
+					return exitCopyError
+				}
+				return exitOK
+			}
+		}
+	}
+
 	select {
 	case err := <-copyDone:
 		if err != nil {
