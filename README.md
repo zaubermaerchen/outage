@@ -140,6 +140,25 @@ the descriptor cannot accept an event, outage warns once on stderr, disables
 further event output, and continues normal processing. The descriptor remains
 owned by the caller.
 
+## Machine-readable self-description
+
+Use `--describe` to print one compact JSON object describing the current CLI,
+stream interfaces, lifecycle state machine, and side effects:
+
+```sh
+outage --describe
+```
+
+`--describe` is standalone and exits without reading stdin, copying the stream,
+starting condition monitoring, or opening an event descriptor. It reports the
+same build version as `--version`. `--help` has priority if it appears with
+`--describe`; other combinations with conditions, `--or`, `--events-fd`, or
+`--version` are argument errors. The description uses schema version `1`;
+consumers should preserve the meaning of existing fields and ignore unknown
+fields so compatible additions can be introduced later. `side_effects` is
+empty because stream cutoff is outage's core operation rather than an external
+side effect.
+
 ## Guarantee boundary
 
 `outage` does not discover the producer or send it SIGPIPE or any other signal.
@@ -166,6 +185,8 @@ and the producer. Stopping the producer itself is not guaranteed.
   group exits `outage`.
 - `-h` and `--help` display help. A help token has highest priority wherever it
   appears in the argument list, even alongside invalid arguments or `--version`.
+- `--describe` prints the standalone machine-readable self-description. Help
+  still takes priority when both tokens appear.
 - Standalone `--version` prints the version.
 - `--events-fd N` (or `--events-fd=N`) enables JSONL condition lifecycle events on inherited file descriptor `N`; `N` must be at least 3 and the option may be specified only once.
 
