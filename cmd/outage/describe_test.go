@@ -158,8 +158,9 @@ func TestRunDescribeMetadataIsComplete(t *testing.T) {
 
 	var document struct {
 		CLISchema struct {
-			Options   []outageDescriptionOption `json:"options"`
-			Arguments []struct {
+			Options        []outageDescriptionOption        `json:"options"`
+			ConditionForms []outageDescriptionConditionForm `json:"condition_forms"`
+			Arguments      []struct {
 				Name         string   `json:"name"`
 				Type         string   `json:"type"`
 				Required     bool     `json:"required"`
@@ -169,6 +170,7 @@ func TestRunDescribeMetadataIsComplete(t *testing.T) {
 				AndSemantics string   `json:"and_semantics"`
 				OrOption     string   `json:"or_option"`
 				OrSemantics  string   `json:"or_semantics"`
+				OrForms      []string `json:"or_forms"`
 			} `json:"arguments"`
 		} `json:"cli_schema"`
 		StreamSemantics map[string]outageDescriptionStream `json:"stream_semantics"`
@@ -225,6 +227,59 @@ func TestRunDescribeMetadataIsComplete(t *testing.T) {
 	if argument.AndSeparator != " && " || argument.AndSemantics == "" || argument.OrOption != "--or" || argument.OrSemantics == "" {
 		t.Fatalf("condition composition = %#v, want exact AND/OR rules", argument)
 	}
+	if !equalOutageDescriptionStrings(argument.OrForms, []string{"--or CONDITION", "--or=CONDITION"}) {
+		t.Fatalf("condition OR forms = %#v, want --or CONDITION/--or=CONDITION", argument.OrForms)
+	}
+	for _, want := range []string{"exact literal", "not trimmed", "not escapable"} {
+		if !strings.Contains(strings.ToLower(argument.AndSemantics), strings.ToLower(want)) {
+			t.Errorf("AND semantics = %q, want %q", argument.AndSemantics, want)
+		}
+	}
+	for _, want := range []string{"--or CONDITION", "--or=CONDITION"} {
+		if !strings.Contains(argument.OrSemantics, want) {
+			t.Errorf("OR semantics = %q, want %q", argument.OrSemantics, want)
+		}
+	}
+
+	wantConditionForms := []outageDescriptionConditionForm{
+		{
+			Name:          "signal",
+			Syntax:        []string{"signal:USR1", "signal:SIGUSR1", "signal:USR2", "signal:SIGUSR2"},
+			UnsupportedOn: []string{"windows"},
+		},
+		{
+			Name:           "file",
+			Syntax:         []string{"file:<path>"},
+			NonEmpty:       boolPointer(true),
+			ValuePreserved: boolPointer(true),
+			Trigger:        "path-resolves-to-regular-file",
+		},
+		{
+			Name:        "duration",
+			Syntax:      []string{"duration:<value>"},
+			ValueFormat: "go-duration",
+			NonNegative: boolPointer(true),
+			ZeroAllowed: boolPointer(true),
+		},
+		{
+			Name:                            "datetime",
+			Syntax:                          []string{"datetime:YYYY-MM-DDTHH:MM", "datetime:YYYY-MM-DDTHH:MM:SS", "datetime:YYYY-MM-DDTHH:MM:SSZ", "datetime:YYYY-MM-DDTHH:MM:SS+HH:MM", "datetime:YYYY-MM-DDTHH:MM:SS-HH:MM"},
+			TimezoneLessTimezone:            "process-startup",
+			ExplicitTimezoneRequiresSeconds: boolPointer(true),
+			Fractional:                      boolPointer(false),
+			IANA:                            boolPointer(false),
+			TimezoneLessDSTGap:              "invalid",
+			TimezoneLessDSTOverlap:          "earliest-absolute-instant",
+		},
+	}
+	if len(document.CLISchema.ConditionForms) != len(wantConditionForms) {
+		t.Fatalf("condition form count = %d, want %d: %#v", len(document.CLISchema.ConditionForms), len(wantConditionForms), document.CLISchema.ConditionForms)
+	}
+	for i, want := range wantConditionForms {
+		if !equalOutageDescriptionConditionForm(document.CLISchema.ConditionForms[i], want) {
+			t.Errorf("condition form %d = %#v, want %#v", i, document.CLISchema.ConditionForms[i], want)
+		}
+	}
 
 	wantRoles := map[string]string{
 		"stdin":    "input",
@@ -251,17 +306,22 @@ func TestRunDescribeMetadataIsComplete(t *testing.T) {
 	if document.StateMachine.InitialState != "monitoring" {
 		t.Fatalf("initial state = %q, want monitoring", document.StateMachine.InitialState)
 	}
-	if document.StateMachine.InitialEvent != "monitoring" {
-		t.Fatalf("initial event = %q, want monitoring", document.StateMachine.InitialEvent)
-	}
 	if !equalOutageDescriptionStrings(document.StateMachine.States, []string{"monitoring", "triggered", "cutoff", "eof", "error"}) {
 		t.Fatalf("states = %#v, want monitoring/triggered/cutoff/eof/error", document.StateMachine.States)
 	}
-	if !equalOutageDescriptionStrings(document.StateMachine.Events, []string{"monitoring", "condition-triggered", "stream-cutoff", "eof", "error"}) {
-		t.Fatalf("events = %#v, want monitoring/condition-triggered/stream-cutoff/eof/error", document.StateMachine.Events)
+	if !equalOutageDescriptionStrings(document.StateMachine.Events, []string{"condition-triggered", "stream-cutoff", "eof", "error"}) {
+		t.Fatalf("events = %#v, want condition-triggered/stream-cutoff/eof/error", document.StateMachine.Events)
 	}
-	if !equalOutageDescriptionStrings(document.StateMachine.EventFDOrder, []string{"condition-triggered", "stream-cutoff"}) {
-		t.Fatalf("event FD order = %#v, want condition-triggered then stream-cutoff", document.StateMachine.EventFDOrder)
+	if !equalOutageDescriptionStrings(document.StateMachine.EventFDEvents, []string{"condition-triggered", "stream-cutoff"}) {
+		t.Fatalf("event FD events = %#v, want condition-triggered then stream-cutoff", document.StateMachine.EventFDEvents)
+	}
+	if containsOutageDescriptionString(document.StateMachine.EventFDEvents, "monitoring") {
+		t.Fatal("monitoring is incorrectly listed as an event-FD record")
+	}
+	for _, event := range document.StateMachine.EventFDEvents {
+		if !containsOutageDescriptionString(document.StateMachine.Events, event) {
+			t.Fatalf("event FD event %q is not a lifecycle event", event)
+		}
 	}
 	if len(document.StateMachine.Transitions) != 4 {
 		t.Fatalf("transition count = %d, want 4", len(document.StateMachine.Transitions))
@@ -279,6 +339,19 @@ func TestRunDescribeMetadataIsComplete(t *testing.T) {
 	}
 	if len(document.SideEffects) != 0 {
 		t.Fatalf("side effects = %#v, want empty", document.SideEffects)
+	}
+
+	var topLevel struct {
+		StateMachine map[string]json.RawMessage `json:"state_machine"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &topLevel); err != nil {
+		t.Fatalf("decode state machine fields: %v", err)
+	}
+	if _, ok := topLevel.StateMachine["initial_event"]; ok {
+		t.Fatal("state machine unexpectedly exposes initial_event")
+	}
+	if _, ok := topLevel.StateMachine["event_fd_order"]; ok {
+		t.Fatal("state machine unexpectedly exposes event_fd_order")
 	}
 }
 
@@ -352,10 +425,11 @@ func TestDescriptionEventFDDocumentsDeliveredRecordOrdering(t *testing.T) {
 	for _, want := range []string{
 		"writable",
 		"write succeeds",
-		"any delivered records retain",
+		"delivered records",
 		"condition-triggered then stream-cutoff order",
 		"failure may omit remaining records",
-		"never reorder",
+		"delivered records are never reordered",
+		"EOF and errors emit no event-FD records",
 		"stderr",
 		"warning",
 		"further",
@@ -386,12 +460,29 @@ type outageDescriptionStream struct {
 }
 
 type outageDescriptionState struct {
-	InitialState string                        `json:"initial_state"`
-	InitialEvent string                        `json:"initial_event"`
-	States       []string                      `json:"states"`
-	Events       []string                      `json:"events"`
-	EventFDOrder []string                      `json:"event_fd_order"`
-	Transitions  []outageDescriptionTransition `json:"transitions"`
+	InitialState  string                        `json:"initial_state"`
+	States        []string                      `json:"states"`
+	Events        []string                      `json:"events"`
+	EventFDEvents []string                      `json:"event_fd_events"`
+	Transitions   []outageDescriptionTransition `json:"transitions"`
+}
+
+type outageDescriptionConditionForm struct {
+	Name                            string   `json:"name"`
+	Syntax                          []string `json:"syntax"`
+	UnsupportedOn                   []string `json:"unsupported_on"`
+	NonEmpty                        *bool    `json:"non_empty"`
+	ValuePreserved                  *bool    `json:"value_preserved"`
+	Trigger                         string   `json:"trigger"`
+	ValueFormat                     string   `json:"value_format"`
+	NonNegative                     *bool    `json:"non_negative"`
+	ZeroAllowed                     *bool    `json:"zero_allowed"`
+	TimezoneLessTimezone            string   `json:"timezone_less_timezone"`
+	ExplicitTimezoneRequiresSeconds *bool    `json:"explicit_timezone_requires_seconds"`
+	Fractional                      *bool    `json:"fractional"`
+	IANA                            *bool    `json:"iana"`
+	TimezoneLessDSTGap              string   `json:"timezone_less_dst_gap"`
+	TimezoneLessDSTOverlap          string   `json:"timezone_less_dst_overlap"`
 }
 
 type outageDescriptionTransition struct {
@@ -416,4 +507,40 @@ func equalOutageDescriptionStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+func equalOutageDescriptionConditionForm(got, want outageDescriptionConditionForm) bool {
+	return got.Name == want.Name &&
+		equalOutageDescriptionStrings(got.Syntax, want.Syntax) &&
+		equalOutageDescriptionStrings(got.UnsupportedOn, want.UnsupportedOn) &&
+		equalOutageDescriptionBoolPointer(got.NonEmpty, want.NonEmpty) &&
+		equalOutageDescriptionBoolPointer(got.ValuePreserved, want.ValuePreserved) &&
+		got.Trigger == want.Trigger &&
+		got.ValueFormat == want.ValueFormat &&
+		equalOutageDescriptionBoolPointer(got.NonNegative, want.NonNegative) &&
+		equalOutageDescriptionBoolPointer(got.ZeroAllowed, want.ZeroAllowed) &&
+		got.TimezoneLessTimezone == want.TimezoneLessTimezone &&
+		equalOutageDescriptionBoolPointer(got.ExplicitTimezoneRequiresSeconds, want.ExplicitTimezoneRequiresSeconds) &&
+		equalOutageDescriptionBoolPointer(got.Fractional, want.Fractional) &&
+		equalOutageDescriptionBoolPointer(got.IANA, want.IANA) &&
+		got.TimezoneLessDSTGap == want.TimezoneLessDSTGap &&
+		got.TimezoneLessDSTOverlap == want.TimezoneLessDSTOverlap
+}
+
+func equalOutageDescriptionBoolPointer(got, want *bool) bool {
+	if got == nil || want == nil {
+		return got == want
+	}
+	return *got == *want
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func containsOutageDescriptionString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

@@ -18,8 +18,9 @@ type description struct {
 }
 
 type cliDescription struct {
-	Options   []cliOptionDescription   `json:"options"`
-	Arguments []cliArgumentDescription `json:"arguments"`
+	Options        []cliOptionDescription     `json:"options"`
+	ConditionForms []conditionFormDescription `json:"condition_forms"`
+	Arguments      []cliArgumentDescription   `json:"arguments"`
 }
 
 type cliOptionDescription struct {
@@ -43,7 +44,31 @@ type cliArgumentDescription struct {
 	AndSemantics string   `json:"and_semantics"`
 	OrOption     string   `json:"or_option"`
 	OrSemantics  string   `json:"or_semantics"`
+	OrForms      []string `json:"or_forms"`
 }
+
+// conditionFormDescription is the small, static public vocabulary for
+// positional condition values. Pointer booleans preserve explicit false
+// constraints while omitting constraints that do not apply to a form.
+type conditionFormDescription struct {
+	Name                            string   `json:"name"`
+	Syntax                          []string `json:"syntax"`
+	UnsupportedOn                   []string `json:"unsupported_on,omitempty"`
+	NonEmpty                        *bool    `json:"non_empty,omitempty"`
+	ValuePreserved                  *bool    `json:"value_preserved,omitempty"`
+	Trigger                         string   `json:"trigger,omitempty"`
+	ValueFormat                     string   `json:"value_format,omitempty"`
+	NonNegative                     *bool    `json:"non_negative,omitempty"`
+	ZeroAllowed                     *bool    `json:"zero_allowed,omitempty"`
+	TimezoneLessTimezone            string   `json:"timezone_less_timezone,omitempty"`
+	ExplicitTimezoneRequiresSeconds *bool    `json:"explicit_timezone_requires_seconds,omitempty"`
+	Fractional                      *bool    `json:"fractional,omitempty"`
+	IANA                            *bool    `json:"iana,omitempty"`
+	TimezoneLessDSTGap              string   `json:"timezone_less_dst_gap,omitempty"`
+	TimezoneLessDSTOverlap          string   `json:"timezone_less_dst_overlap,omitempty"`
+}
+
+func conditionBool(value bool) *bool { return &value }
 
 type streamDescription struct {
 	Stdin   streamInterfaceDescription `json:"stdin"`
@@ -60,12 +85,11 @@ type streamInterfaceDescription struct {
 }
 
 type stateDescription struct {
-	InitialState string            `json:"initial_state"`
-	InitialEvent string            `json:"initial_event"`
-	States       []string          `json:"states"`
-	Events       []string          `json:"events"`
-	EventFDOrder []string          `json:"event_fd_order"`
-	Transitions  []stateTransition `json:"transitions"`
+	InitialState  string            `json:"initial_state"`
+	States        []string          `json:"states"`
+	Events        []string          `json:"events"`
+	EventFDEvents []string          `json:"event_fd_events"`
+	Transitions   []stateTransition `json:"transitions"`
 }
 
 type stateTransition struct {
@@ -123,6 +147,37 @@ func newDescription() description {
 					Conflicts:  []string{"--describe", "--version"},
 				},
 			},
+			ConditionForms: []conditionFormDescription{
+				{
+					Name:          "signal",
+					Syntax:        []string{"signal:USR1", "signal:SIGUSR1", "signal:USR2", "signal:SIGUSR2"},
+					UnsupportedOn: []string{"windows"},
+				},
+				{
+					Name:           "file",
+					Syntax:         []string{"file:<path>"},
+					NonEmpty:       conditionBool(true),
+					ValuePreserved: conditionBool(true),
+					Trigger:        "path-resolves-to-regular-file",
+				},
+				{
+					Name:        "duration",
+					Syntax:      []string{"duration:<value>"},
+					ValueFormat: "go-duration",
+					NonNegative: conditionBool(true),
+					ZeroAllowed: conditionBool(true),
+				},
+				{
+					Name:                            "datetime",
+					Syntax:                          []string{"datetime:YYYY-MM-DDTHH:MM", "datetime:YYYY-MM-DDTHH:MM:SS", "datetime:YYYY-MM-DDTHH:MM:SSZ", "datetime:YYYY-MM-DDTHH:MM:SS+HH:MM", "datetime:YYYY-MM-DDTHH:MM:SS-HH:MM"},
+					TimezoneLessTimezone:            "process-startup",
+					ExplicitTimezoneRequiresSeconds: conditionBool(true),
+					Fractional:                      conditionBool(false),
+					IANA:                            conditionBool(false),
+					TimezoneLessDSTGap:              "invalid",
+					TimezoneLessDSTOverlap:          "earliest-absolute-instant",
+				},
+			},
 			Arguments: []cliArgumentDescription{
 				{
 					Name:         "CONDITION",
@@ -130,9 +185,10 @@ func newDescription() description {
 					Required:     true,
 					Conflicts:    []string{"--describe", "--version"},
 					AndSeparator: " && ",
-					AndSemantics: "Members separated by the exact literal separator are AND requirements; every member must be satisfied and remains latched.",
+					AndSemantics: "Members are separated by the exact literal \" && \" separator; operands are not trimmed and the separator is not escapable. Every member must be satisfied and remains latched.",
 					OrOption:     "--or",
-					OrSemantics:  "Each --or CONDITION starts an alternative AND group; outage exits when any group is satisfied.",
+					OrSemantics:  "Each --or CONDITION or --or=CONDITION starts an alternative AND group; outage exits when any group is satisfied.",
+					OrForms:      []string{"--or CONDITION", "--or=CONDITION"},
 				},
 			},
 		},
@@ -151,17 +207,16 @@ func newDescription() description {
 			},
 			EventFD: streamInterfaceDescription{
 				Role:        "observation",
-				Description: "Optional machine-readable lifecycle event stream written as JSONL when --events-fd is configured. When the caller-supplied descriptor is writable and each event write succeeds, any delivered records retain the condition-triggered then stream-cutoff order. A setup or event write failure may omit remaining records; outage writes one warning to stderr and disables further event records, so delivery is best-effort but records are never reordered. EOF and errors emit no lifecycle records.",
+				Description: "Optional machine-readable lifecycle event stream written as JSONL when --events-fd is configured. When the caller-supplied descriptor is writable and each event write succeeds, delivered records retain the condition-triggered then stream-cutoff order. Delivery is best-effort: a setup or event write failure may omit remaining records; outage writes one warning to stderr and disables further event records, and delivered records are never reordered. EOF and errors emit no event-FD records.",
 				Format:      "jsonl",
 				Option:      "--events-fd",
 			},
 		},
 		StateMachine: stateDescription{
-			InitialState: "monitoring",
-			InitialEvent: "monitoring",
-			States:       []string{"monitoring", "triggered", "cutoff", "eof", "error"},
-			Events:       []string{"monitoring", "condition-triggered", "stream-cutoff", "eof", "error"},
-			EventFDOrder: []string{"condition-triggered", "stream-cutoff"},
+			InitialState:  "monitoring",
+			States:        []string{"monitoring", "triggered", "cutoff", "eof", "error"},
+			Events:        []string{"condition-triggered", "stream-cutoff", "eof", "error"},
+			EventFDEvents: []string{"condition-triggered", "stream-cutoff"},
 			Transitions: []stateTransition{
 				{From: "monitoring", Event: "condition-triggered", To: "triggered"},
 				{From: "triggered", Event: "stream-cutoff", To: "cutoff"},
