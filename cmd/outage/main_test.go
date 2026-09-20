@@ -184,6 +184,8 @@ func TestRunHelpDocumentsSupportedUsage(t *testing.T) {
 	}
 
 	for _, want := range []string{
+		"Usage: outage --describe",
+		"--describe",
 		"Usage: outage signal:USR1",
 		"signal:SIGUSR1",
 		"outage signal:USR2",

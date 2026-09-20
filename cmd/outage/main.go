@@ -1,7 +1,7 @@
 package main
 
-// This file validates command-line arguments and coordinates event monitoring,
-// version output, and stream copying.
+// This file validates command-line arguments and coordinates self-description,
+// version output, event monitoring, and stream copying.
 
 import (
 	"context"
@@ -21,6 +21,7 @@ const (
 )
 
 const helpText = `Usage: outage CONDITION [--or CONDITION]...
+Usage: outage --describe
 Usage: outage signal:USR1
        outage signal:SIGUSR1
        outage signal:USR2
@@ -64,6 +65,7 @@ Arguments:
   datetime:YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|-HH:MM]
                              RFC3339 form; explicit timezones require seconds.
 Options:
+  --describe                Print the machine-readable CLI and lifecycle description.
   --or CONDITION            Use CONDITION as an alternative group. May be
                             written as --or=CONDITION.
   --events-fd N             Write condition lifecycle events as JSONL to FD N.
@@ -86,12 +88,22 @@ func run(args []string, in io.Reader, out io.Writer, errOut io.Writer) int {
 }
 
 func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, clock runtimeClock) int {
-	clock = clock.normalized()
-	startedAt := clock.now()
-
 	if cli.HelpRequested(args) {
 		ignoreSIGPIPE()
 		if _, err := fmt.Fprint(out, helpText); err != nil {
+			writeDiagnostic(errOut, err)
+			return exitCopyError
+		}
+		return exitOK
+	}
+
+	if describeRequested(args) {
+		if len(args) != 1 {
+			writeDiagnostic(errOut, fmt.Errorf("--describe cannot be combined with other arguments"))
+			return exitArgError
+		}
+		ignoreSIGPIPE()
+		if err := printDescription(out); err != nil {
 			writeDiagnostic(errOut, err)
 			return exitCopyError
 		}
@@ -106,6 +118,9 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		}
 		return exitOK
 	}
+
+	clock = clock.normalized()
+	startedAt := clock.now()
 
 	plan, err := cli.Parse(args, clock.location)
 	if err != nil {
