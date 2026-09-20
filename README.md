@@ -203,7 +203,7 @@ remain unsupported on Windows.
 Inject the release version at build time with Go's linker flags:
 
 ```sh
-go build -ldflags "-X main.version=v0.4.1" ./cmd/outage
+go build -ldflags "-X main.version=v0.5.0" ./cmd/outage
 ```
 
 Starting with v0.4.1, release archives include a Linux ARMv6 build for
