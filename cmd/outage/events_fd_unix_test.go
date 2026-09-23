@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,7 +153,7 @@ func TestUnixEventEmitterPreservesCallerFlagsAndInheritance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status != originalStatus {
+	if comparableEventStatusFlags(status) != comparableEventStatusFlags(originalStatus) {
 		t.Fatalf("caller status flags = %#x, want %#x", status, originalStatus)
 	}
 	if descriptor != originalDescriptor {
@@ -161,6 +162,17 @@ func TestUnixEventEmitterPreservesCallerFlagsAndInheritance(t *testing.T) {
 	if diagnostics.Len() != 0 {
 		t.Fatalf("diagnostics = %q, want empty", diagnostics.String())
 	}
+}
+
+func comparableEventStatusFlags(flags int) int {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "ios" {
+		// Darwin adds its kernel-only FWASWRITTEN marker after a successful
+		// write through any descriptor sharing the open-file description.
+		// It is not a caller-controlled file status flag.
+		const darwinKernelWrittenFlag = 1 << 16
+		return flags &^ darwinKernelWrittenFlag
+	}
+	return flags
 }
 
 func TestUnixEventEmitterDisablesAfterCallerModeChange(t *testing.T) {
