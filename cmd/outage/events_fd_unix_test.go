@@ -118,6 +118,67 @@ func TestUnixEventDescriptorAcceptsNonblockingSocket(t *testing.T) {
 	}
 }
 
+func TestUnixEventEmitterDisablesAfterShortSocketWrite(t *testing.T) {
+	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unix.Close(pair[0])
+		_ = unix.Close(pair[1])
+	})
+	if err := unix.SetNonblock(pair[0], true); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetNonblock(pair[1], true); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.SetsockoptInt(pair[0], unix.SOL_SOCKET, unix.SO_SNDBUF, 4096); err != nil {
+		t.Fatal(err)
+	}
+
+	diagnostics := newEventDiagnostics()
+	emitter := newEventEmitter(pair[0], diagnostics)
+	if emitter == nil {
+		t.Fatalf("newEventEmitter() returned nil: %q", diagnostics.String())
+	}
+	defer emitter.close()
+
+	// A stream socket can accept a prefix of a record without accepting the
+	// whole record. Keep the peer idle until the emitter handles that result.
+	emitter.emit(strings.Repeat("x", 1<<20))
+	if got := waitForEventWarning(t, diagnostics); !strings.Contains(got, "short write") || strings.Count(got, "events disabled:") != 1 {
+		t.Fatalf("diagnostics = %q, want one short-write warning", got)
+	}
+
+	buffer := make([]byte, 8192)
+	var received int
+	for {
+		n, err := unix.Read(pair[1], buffer)
+		received += n
+		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			t.Fatal("event peer closed unexpectedly")
+		}
+	}
+	if received == 0 || received >= 1<<20 {
+		t.Fatalf("received %d bytes, want a nonempty prefix of the oversized event", received)
+	}
+	// Once the peer has room again, a disabled emitter must still send nothing.
+	emitter.emit("after-short-write")
+	if n, err := unix.Read(pair[1], buffer); n != -1 || (err != unix.EAGAIN && err != unix.EWOULDBLOCK) {
+		t.Fatalf("read after disabled emission = (%d, %v), want (-1, EAGAIN)", n, err)
+	}
+	if got := strings.Count(diagnostics.String(), "events disabled:"); got != 1 {
+		t.Fatalf("warnings = %d: %q", got, diagnostics.String())
+	}
+}
+
 func TestUnixEventEmitterPreservesCallerFlagsAndInheritance(t *testing.T) {
 	_, writeEvents := newObservationPipe(t)
 	fd := rawEventFD(t, writeEvents)
