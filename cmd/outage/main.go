@@ -70,8 +70,14 @@ Options:
                             written as --or=CONDITION.
   --events-fd N             Write condition lifecycle events as JSONL to FD N.
                              May be written as --events-fd=N; N must be at least 3.
+                             Unix requires a writable nonblocking pipe, FIFO, or
+                             socket; Windows requires a
+                             writable PIPE_NOWAIT pipe handle. The descriptor
+                             and its write access are validated before stdin is
+                             read.
                              Condition shutdown emits condition-triggered then
-                             stream-cutoff.
+                             stream-cutoff. Write failures disable events after
+                             one warning; a short write may leave a partial line.
   --version                 Print the version (standalone).
   -h, --help                Show this help.
 Help options take priority over every other argument.
@@ -129,7 +135,14 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 	}
 	var emitter *eventEmitter
 	if plan.EventsFDSet {
+		if err := validateEventDescriptor(plan.EventsFD); err != nil {
+			writeDiagnostic(errOut, fmt.Errorf("invalid --events-fd %d: %w", plan.EventsFD, err))
+			return exitArgError
+		}
 		emitter = newEventEmitterWithClock(plan.EventsFD, errOut, clock.now)
+		if emitter == nil {
+			return exitArgError
+		}
 		defer emitter.close()
 	}
 	initialSatisfied, err := initialConditionStates(plan, startedAt, clock, true)

@@ -207,7 +207,7 @@ func newDescription() description {
 			},
 			EventFD: streamInterfaceDescription{
 				Role:        "observation",
-				Description: "Optional machine-readable lifecycle event stream written as JSONL when --events-fd is configured. When the caller-supplied descriptor is writable and each event write succeeds, delivered records retain the condition-triggered then stream-cutoff order. Delivery is best-effort: a setup or event write failure may omit remaining records; outage writes one warning to stderr and disables further event records, and delivered records are never reordered. EOF and errors emit no event-FD records.",
+				Description: "Optional machine-readable lifecycle event stream written as JSONL when --events-fd is configured. Unix accepts only writable pipe, FIFO, or socket descriptors already configured with O_NONBLOCK; Windows accepts only writable pipe handles whose PIPE_NOWAIT mode and write access are verified at startup. Unsupported or unverifiable descriptors are configuration errors reported before stdin is read. The caller retains ownership and must preserve the required mode while outage runs. When the caller-supplied descriptor is writable and each event write succeeds, delivered records retain the condition-triggered then stream-cutoff order. Delivery is best-effort: a setup or event write failure may omit remaining records; outage writes one warning to stderr and disables further event records, and delivered records are never reordered. EOF and errors emit no event-FD records. A short write may leave an incomplete final JSONL record.",
 				Format:      "jsonl",
 				Option:      "--events-fd",
 			},

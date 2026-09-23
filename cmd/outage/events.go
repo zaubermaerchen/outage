@@ -38,10 +38,6 @@ func newEventEmitterWithClock(fd int, diagnostics io.Writer, now func() time.Tim
 		writeDiagnostic(diagnostics, fmt.Errorf("events disabled: invalid file descriptor %d", fd))
 		return nil
 	}
-	if err := setEventDescriptorNonInheritable(fd); err != nil {
-		writeDiagnostic(diagnostics, fmt.Errorf("events disabled: protect file descriptor %d: %w", fd, err))
-		return nil
-	}
 	file, err := duplicateEventFile(fd)
 	if err != nil {
 		writeDiagnostic(diagnostics, fmt.Errorf("events disabled: duplicate file descriptor %d: %w", fd, err))
@@ -85,7 +81,11 @@ func (emitter *eventEmitter) emitRecord(record lifecycleEventRecord) {
 	}
 	if err != nil {
 		emitter.disabled = true
-		writeDiagnostic(emitter.diagnostics, fmt.Errorf("events disabled: %w", err))
+		diagnostics := emitter.diagnostics
+		warning := fmt.Errorf("events disabled: %w", err)
+		// stderr can be backpressured too; keep the observation failure from
+		// holding the event lock or stalling the primary stream.
+		go writeDiagnostic(diagnostics, warning)
 	}
 }
 
