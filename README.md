@@ -203,7 +203,7 @@ and the producer. Stopping the producer itself is not guaranteed.
 - `--describe` prints the standalone machine-readable self-description. Help
   still takes priority when both tokens appear.
 - Standalone `--version` prints the version.
-- `--events-fd N` (or `--events-fd=N`) enables JSONL condition lifecycle events on inherited descriptor `N`; `N` must be at least 3 and the option may be specified only once. Unix requires a writable nonblocking pipe, FIFO, or socket; Windows requires a verifiable `PIPE_NOWAIT` pipe handle. The descriptor is checked before stdin processing, remains owned by the caller, and runtime delivery failures disable further records after one warning.
+- `--events-fd N` (or `--events-fd=N`) enables JSONL condition lifecycle events on inherited descriptor `N`; `N` must be at least 3 and the option may be specified only once. Unix requires a writable nonblocking pipe, FIFO, or socket; Windows requires a writable, verifiable `PIPE_NOWAIT` pipe handle. The descriptor is checked before stdin processing, remains owned by the caller, and runtime delivery failures disable further records while attempting one warning.
 
 ## Platform support
 

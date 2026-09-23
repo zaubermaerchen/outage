@@ -76,8 +76,9 @@ Options:
                              and its write access are validated before stdin is
                              read.
                              Condition shutdown emits condition-triggered then
-                             stream-cutoff. Write failures disable events after
-                             one warning; a short write may leave a partial line.
+                             stream-cutoff. Write failures disable events and
+                             attempt one warning; a short write may leave a
+                             partial line.
   --version                 Print the version (standalone).
   -h, --help                Show this help.
 Help options take priority over every other argument.

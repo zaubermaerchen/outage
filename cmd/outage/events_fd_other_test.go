@@ -2,6 +2,8 @@
 
 package main
 
+// This file provides event descriptor test stubs for unsupported platforms.
+
 import (
 	"os"
 	"testing"
