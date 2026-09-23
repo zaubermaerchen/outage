@@ -11,7 +11,7 @@ import (
 
 var errEventFDUnsupported = errors.New("event file descriptors are unsupported on this platform")
 
-func setEventDescriptorNonInheritable(int) error {
+func validateEventDescriptor(int) error {
 	return errEventFDUnsupported
 }
 

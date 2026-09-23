@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,11 +22,61 @@ type testLifecycleEvent struct {
 	Timestamp string `json:"timestamp"`
 }
 
+type eventCapture struct {
+	*os.File
+	read *os.File
+}
+
+type eventsTrackingReader struct {
+	readCalled bool
+}
+
+func (reader *eventsTrackingReader) Read([]byte) (int, error) {
+	reader.readCalled = true
+	return 0, io.EOF
+}
+
+type eventDiagnostics struct {
+	mu      sync.Mutex
+	data    bytes.Buffer
+	entered chan struct{}
+	once    sync.Once
+}
+
+func newEventDiagnostics() *eventDiagnostics {
+	return &eventDiagnostics{entered: make(chan struct{})}
+}
+
+func (diagnostics *eventDiagnostics) Write(data []byte) (int, error) {
+	diagnostics.mu.Lock()
+	n, err := diagnostics.data.Write(data)
+	diagnostics.mu.Unlock()
+	diagnostics.once.Do(func() { close(diagnostics.entered) })
+	return n, err
+}
+
+func (diagnostics *eventDiagnostics) String() string {
+	diagnostics.mu.Lock()
+	defer diagnostics.mu.Unlock()
+	return diagnostics.data.String()
+}
+
+func waitForEventWarning(t *testing.T, diagnostics *eventDiagnostics) string {
+	t.Helper()
+	select {
+	case <-diagnostics.entered:
+		return diagnostics.String()
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event warning")
+		return ""
+	}
+}
+
 func TestRunEventsFDEmitsConditionAndCutoffEventsForInitialCondition(t *testing.T) {
 	eventsFile := newEventsFile(t)
 	var output, diagnostics bytes.Buffer
 	status := run([]string{
-		"--events-fd=" + strconv.FormatUint(uint64(eventsFile.Fd()), 10),
+		"--events-fd=" + strconv.Itoa(eventCaptureFD(t, eventsFile)),
 		"duration:0s",
 	}, unreadableReader{}, &output, &diagnostics)
 	if status != exitOK {
@@ -56,7 +107,7 @@ func TestRunEventsFDEmitsConditionAndCutoffEventsForMonitoredCondition(t *testin
 	status := make(chan int, 1)
 	go func() {
 		status <- runWithClock([]string{
-			"--events-fd", strconv.FormatUint(uint64(eventsFile.Fd()), 10),
+			"--events-fd", strconv.Itoa(eventCaptureFD(t, eventsFile)),
 			"duration:1s",
 		}, reader, &output, &diagnostics, clock)
 	}()
@@ -90,7 +141,7 @@ func TestRunEventsFDDoesNotEmitForInputEOF(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	status := run([]string{
 		"--events-fd",
-		strconv.FormatUint(uint64(eventsFile.Fd()), 10),
+		strconv.Itoa(eventCaptureFD(t, eventsFile)),
 		"duration:1h",
 	}, strings.NewReader("input"), &output, &diagnostics)
 	if status != exitOK {
@@ -109,7 +160,7 @@ func TestRunEventsFDDoesNotEmitForCopyError(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	status := run([]string{
 		"--events-fd",
-		strconv.FormatUint(uint64(eventsFile.Fd()), 10),
+		strconv.Itoa(eventCaptureFD(t, eventsFile)),
 		"duration:1h",
 	}, failingReader{err: errors.New("read failed")}, &output, &diagnostics)
 	if status != exitCopyError {
@@ -132,7 +183,7 @@ func TestWaitForCopyOrConditionPrioritizesReadyCopyCompletion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			eventsFile := newEventsFile(t)
 			var diagnostics bytes.Buffer
-			emitter := newEventEmitter(int(eventsFile.Fd()), &diagnostics)
+			emitter := newEventEmitter(eventCaptureFD(t, eventsFile), &diagnostics)
 			if emitter == nil {
 				t.Fatal("newEventEmitter returned nil")
 			}
@@ -146,6 +197,7 @@ func TestWaitForCopyOrConditionPrioritizesReadyCopyCompletion(t *testing.T) {
 			if got := waitForCopyOrCondition(events, copyDone, emitter, &diagnostics); got != tc.wantStatus {
 				t.Fatalf("waitForCopyOrCondition status = %d, want %d; diagnostics = %q", got, tc.wantStatus, diagnostics.String())
 			}
+			emitter.close()
 			if records := readLifecycleEvents(t, eventsFile); len(records) != 0 {
 				t.Fatalf("events = %#v, want no events when copy completion was already ready", records)
 			}
@@ -161,7 +213,7 @@ func TestHandleConditionEventRechecksCopyBeforeCutoff(t *testing.T) {
 		t.Run(map[bool]string{false: "event", true: "closed event"}[eventClosed], func(t *testing.T) {
 			eventsFile := newEventsFile(t)
 			var diagnostics bytes.Buffer
-			emitter := newEventEmitter(int(eventsFile.Fd()), &diagnostics)
+			emitter := newEventEmitter(eventCaptureFD(t, eventsFile), &diagnostics)
 			if emitter == nil {
 				t.Fatal("newEventEmitter returned nil")
 			}
@@ -173,6 +225,7 @@ func TestHandleConditionEventRechecksCopyBeforeCutoff(t *testing.T) {
 			if got := handleConditionEvent(!eventClosed, copyDone, emitter, &diagnostics); got != exitCopyError {
 				t.Fatalf("handleConditionEvent status = %d, want %d; diagnostics = %q", got, exitCopyError, diagnostics.String())
 			}
+			emitter.close()
 			if records := readLifecycleEvents(t, eventsFile); len(records) != 0 {
 				t.Fatalf("events = %#v, want no events after copy completion became ready", records)
 			}
@@ -180,28 +233,28 @@ func TestHandleConditionEventRechecksCopyBeforeCutoff(t *testing.T) {
 	}
 }
 
-func TestRunEventsFDWriteSetupFailureWarnsOnceAndPreservesStream(t *testing.T) {
+func TestRunEventsFDRejectsInvalidDescriptorBeforeStream(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	status := run([]string{
 		"--events-fd",
 		strconv.Itoa(int(^uint(0) >> 1)),
 		"duration:1h",
 	}, strings.NewReader("input"), &output, &diagnostics)
-	if status != exitOK {
-		t.Fatalf("run status = %d, want %d; diagnostics = %q", status, exitOK, diagnostics.String())
+	if status != exitArgError {
+		t.Fatalf("run status = %d, want %d; diagnostics = %q", status, exitArgError, diagnostics.String())
 	}
-	if got, want := output.String(), "input"; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
+	if output.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", output.String())
 	}
-	if got := strings.Count(diagnostics.String(), "events disabled:"); got != 1 {
-		t.Fatalf("diagnostics = %q, want one events warning", diagnostics.String())
+	if got := strings.Count(diagnostics.String(), "invalid --events-fd"); got != 1 {
+		t.Fatalf("diagnostics = %q, want one invalid descriptor diagnostic", diagnostics.String())
 	}
 }
 
 func TestEventEmitterDoesNotCloseCallerFD(t *testing.T) {
 	eventsFile := newEventsFile(t)
 	var diagnostics bytes.Buffer
-	emitter := newEventEmitter(int(eventsFile.Fd()), &diagnostics)
+	emitter := newEventEmitter(eventCaptureFD(t, eventsFile), &diagnostics)
 	if emitter == nil {
 		t.Fatal("newEventEmitter returned nil")
 	}
@@ -215,22 +268,27 @@ func TestEventEmitterDoesNotCloseCallerFD(t *testing.T) {
 	}
 }
 
-func newEventsFile(t *testing.T) *os.File {
+func newEventsFile(t *testing.T) *eventCapture {
 	t.Helper()
-	file, err := os.CreateTemp(t.TempDir(), "outage-events-")
+	read, file, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = file.Close() })
-	return file
+	configureEventsTestDescriptor(t, file)
+	capture := &eventCapture{File: file, read: read}
+	t.Cleanup(func() {
+		_ = capture.Close()
+		_ = capture.read.Close()
+	})
+	return capture
 }
 
-func readLifecycleEvents(t *testing.T, file *os.File) []testLifecycleEvent {
+func readLifecycleEvents(t *testing.T, capture *eventCapture) []testLifecycleEvent {
 	t.Helper()
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
+	if err := capture.Close(); err != nil {
 		t.Fatal(err)
 	}
-	decoder := json.NewDecoder(file)
+	decoder := json.NewDecoder(capture.read)
 	var records []testLifecycleEvent
 	for {
 		var fields map[string]json.RawMessage

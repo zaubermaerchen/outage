@@ -424,6 +424,13 @@ func TestDescriptionEventFDDocumentsDeliveredRecordOrdering(t *testing.T) {
 	eventFD := description.StreamSemantics.EventFD.Description
 	for _, want := range []string{
 		"writable",
+		"writable pipe handles",
+		"pipe, FIFO, or socket",
+		"O_NONBLOCK",
+		"PIPE_NOWAIT",
+		"write access",
+		"before stdin is read",
+		"caller retains ownership",
 		"write succeeds",
 		"delivered records",
 		"condition-triggered then stream-cutoff order",
@@ -434,6 +441,7 @@ func TestDescriptionEventFDDocumentsDeliveredRecordOrdering(t *testing.T) {
 		"warning",
 		"further",
 		"delivery is best-effort",
+		"incomplete final JSONL record",
 	} {
 		if !strings.Contains(strings.ToLower(eventFD), strings.ToLower(want)) {
 			t.Errorf("event FD description = %q, want %q", eventFD, want)

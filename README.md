@@ -117,14 +117,28 @@ USR2 has the same termination semantics.
 Diagnostics are written to stderr. Stdin or stdout I/O errors exit with status
 1; invalid normal-operation arguments exit with status 2.
 
-For machine-readable lifecycle observations, pass an inherited file descriptor
-with `--events-fd N` (or `--events-fd=N`), where `N` is at least 3:
+For machine-readable lifecycle observations, pass an inherited observation
+descriptor with `--events-fd N` (or `--events-fd=N`), where `N` is at least 3.
+On Unix, `N` must be a writable pipe, FIFO, or socket that already has
+`O_NONBLOCK` set. On Windows, it must be a writable pipe handle whose
+`PIPE_NOWAIT` mode is already set and can be verified. `outage` validates the
+descriptor and its write access before reading stdin and exits with status 2
+when it is unsupported or unverifiable.
+
+The following illustrative pipeline assumes a Unix supervisor has already
+installed and configured a nonblocking pipe on FD 3 before starting `outage`:
 
 ```sh
-producer | outage --events-fd 3 duration:30s 3>events.jsonl | consumer
+producer | outage --events-fd 3 duration:30s | consumer
 ```
 
-The `3>events.jsonl` redirection opens and inherits FD 3 for `outage`.
+The supervisor owns and configures the descriptor. `outage` duplicates it for
+its own writes, never closes or changes the caller's descriptor, and the
+caller must keep the required nonblocking or `PIPE_NOWAIT` mode while `outage`
+runs. Regular files, devices, read-only pipe handles, blocking descriptors,
+and unverifiable handles are rejected because event delivery must not block
+the primary stream. The Windows write-access probe duplicates and closes a
+narrow handle without writing an event.
 
 The descriptor receives JSONL records containing only `event` and an observation
 `timestamp` in UTC RFC3339Nano format. When a condition causes the cutoff, the
@@ -136,9 +150,10 @@ records are emitted in this order:
 ```
 
 Event output is optional and does not change the stdin-to-stdout data path. If
-the descriptor cannot accept an event, outage warns once on stderr, disables
-further event output, and continues normal processing. The descriptor remains
-owned by the caller.
+the descriptor mode changes, the consumer is unavailable, or an event write
+fails or is short, outage warns once on stderr where possible, disables
+further event output, and continues normal processing. A short write may leave
+an incomplete final JSONL record. The descriptor remains owned by the caller.
 
 ## Machine-readable self-description
 
@@ -188,7 +203,7 @@ and the producer. Stopping the producer itself is not guaranteed.
 - `--describe` prints the standalone machine-readable self-description. Help
   still takes priority when both tokens appear.
 - Standalone `--version` prints the version.
-- `--events-fd N` (or `--events-fd=N`) enables JSONL condition lifecycle events on inherited file descriptor `N`; `N` must be at least 3 and the option may be specified only once.
+- `--events-fd N` (or `--events-fd=N`) enables JSONL condition lifecycle events on inherited descriptor `N`; `N` must be at least 3 and the option may be specified only once. Unix requires a writable nonblocking pipe, FIFO, or socket; Windows requires a writable, verifiable `PIPE_NOWAIT` pipe handle. The descriptor is checked before stdin processing, remains owned by the caller, and runtime delivery failures disable further records while attempting one warning.
 
 ## Platform support
 
