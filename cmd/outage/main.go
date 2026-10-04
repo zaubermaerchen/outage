@@ -146,11 +146,7 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		}
 		defer emitter.close()
 	}
-	initialSatisfied, err := initialConditionStates(plan, startedAt, clock, true)
-	if err != nil {
-		writeDiagnostic(errOut, err)
-		return exitArgError
-	}
+	initialSatisfied := initialConditionStates(plan, startedAt, clock, true)
 	satisfied := conditionPlanSatisfied(plan, initialSatisfied)
 	root, err := buildConditionTree(plan, startedAt, clock, initialSatisfied)
 	if err != nil {
@@ -180,11 +176,7 @@ func runWithClock(args []string, in io.Reader, out io.Writer, errOut io.Writer, 
 		return exitOK
 	default:
 	}
-	satisfied, err = initialConditionSatisfaction(plan, startedAt, clock, false)
-	if err != nil {
-		writeDiagnostic(errOut, err)
-		return exitArgError
-	}
+	satisfied = initialConditionSatisfaction(plan, startedAt, clock, false)
 	if satisfied {
 		emitCutoffEvents(emitter)
 		return exitOK
@@ -264,28 +256,21 @@ func handleConditionEvent(open bool, copyDone <-chan error, emitter *eventEmitte
 	return exitOK
 }
 
-func initialConditionSatisfaction(plan cli.Plan, startedAt time.Time, clock runtimeClock, checkFiles bool) (bool, error) {
-	satisfied, err := initialConditionStates(plan, startedAt, clock, checkFiles)
-	if err != nil {
-		return false, err
-	}
-	return conditionPlanSatisfied(plan, satisfied), nil
+func initialConditionSatisfaction(plan cli.Plan, startedAt time.Time, clock runtimeClock, checkFiles bool) bool {
+	satisfied := initialConditionStates(plan, startedAt, clock, checkFiles)
+	return conditionPlanSatisfied(plan, satisfied)
 }
 
-func initialConditionStates(plan cli.Plan, startedAt time.Time, clock runtimeClock, checkFiles bool) ([]bool, error) {
+func initialConditionStates(plan cli.Plan, startedAt time.Time, clock runtimeClock, checkFiles bool) []bool {
 	satisfied := make([]bool, len(plan.Conditions))
 	for index, spec := range plan.Conditions {
 		if spec.Kind == cli.FileKind && !checkFiles {
 			satisfied[index] = false
 			continue
 		}
-		var err error
-		satisfied[index], err = conditionAlreadySatisfied(spec, startedAt, clock)
-		if err != nil {
-			return nil, err
-		}
+		satisfied[index] = conditionAlreadySatisfied(spec, startedAt, clock)
 	}
-	return satisfied, nil
+	return satisfied
 }
 
 func conditionPlanSatisfied(plan cli.Plan, satisfied []bool) bool {
@@ -304,23 +289,19 @@ func conditionPlanSatisfied(plan cli.Plan, satisfied []bool) bool {
 	return false
 }
 
-func conditionAlreadySatisfied(spec cli.ConditionSpec, startedAt time.Time, clock runtimeClock) (bool, error) {
+func conditionAlreadySatisfied(spec cli.ConditionSpec, startedAt time.Time, clock runtimeClock) bool {
 	switch spec.Kind {
 	case cli.DurationKind:
-		return spec.Duration <= 0 || clock.now().Sub(startedAt) >= spec.Duration, nil
+		return spec.Duration <= 0 || clock.now().Sub(startedAt) >= spec.Duration
 	case cli.DateTimeKind:
-		return !spec.Deadline.After(clock.now()), nil
+		return !spec.Deadline.After(clock.now())
 	case cli.FileKind:
-		regular, err := isRegularFile(spec.Path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return false, nil
-			}
-			return false, err
-		}
-		return regular, nil
+		// Match polling: stat errors leave this condition unsatisfied so
+		// another --or group can still trigger.
+		regular, _ := isRegularFile(spec.Path)
+		return regular
 	}
-	return false, nil
+	return false
 }
 
 func buildConditionTree(plan cli.Plan, startedAt time.Time, clock runtimeClock, initialSatisfied []bool) (condition.Condition, error) {

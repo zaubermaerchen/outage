@@ -80,8 +80,11 @@ producer | outage file:/tmp/foo | consumer
 The file event triggers immediately when `/tmp/foo` already resolves to a
 regular file. Otherwise, `outage` polls for the path while continuing to
 forward stdin to stdout. A symlink to a regular file triggers the event;
-directories, dangling symlinks, and other non-regular paths do not. The path
-after the first `file:` prefix is passed through unchanged.
+directories, dangling symlinks, and other non-regular paths do not. Stat errors,
+including missing paths, non-directory parents, and permission errors, leave
+the condition unsatisfied; `outage` keeps polling without reporting the error,
+and an alternative `--or` condition can still trigger. The path after the first
+`file:` prefix is passed through unchanged.
 
 To exit after a duration, use a positional duration event:
 
