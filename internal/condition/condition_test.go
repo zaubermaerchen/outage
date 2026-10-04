@@ -136,8 +136,8 @@ func TestDateTimeRearmsCappedTimer(t *testing.T) {
 		},
 	}
 	events := NewDateTime("datetime", deadline, WithRuntime(runtime)).Run(context.Background(), Once)
-	if got := receiveDuration(t, armed); got != maxTimerDuration {
-		t.Fatalf("initial timer delay = %v, want %v", got, maxTimerDuration)
+	if got := receiveDuration(t, armed); got != time.Duration(1<<63-1) {
+		t.Fatalf("initial timer delay = %v, want maximum duration", got)
 	}
 	first <- initial
 	if got := receiveDuration(t, armed); got != 2*time.Second {
