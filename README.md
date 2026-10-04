@@ -239,12 +239,25 @@ version output, portable polling for `file:<path>` events, and portable
 `duration:<value>` and datetime events on all target platforms. Signal events
 remain unsupported on Windows.
 
+## Installation
+
+Install with Homebrew:
+
+```sh
+brew install zaubermaerchen/tap/outage
+```
+
+Alternatively, download the archive for your platform from
+[GitHub Releases](https://github.com/zaubermaerchen/outage/releases), extract the
+`.tar.gz` or `.zip` file, and place the `outage` binary in a directory on your
+`PATH`.
+
 ## Release builds
 
 Inject the release version at build time with Go's linker flags:
 
 ```sh
-go build -ldflags "-X main.version=v0.5.1" ./cmd/outage
+go build -ldflags "-X main.version=v0.5.2" ./cmd/outage
 ```
 
 Starting with v0.4.1, release archives include a Linux ARMv6 build for
