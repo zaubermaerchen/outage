@@ -693,6 +693,39 @@ func TestRunSetupRecheckIgnoresTransientFileStatErrors(t *testing.T) {
 	}
 }
 
+func TestInitialFileStatErrorsRemainUnsatisfied(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	if err := os.WriteFile(parent, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "missing", path: filepath.Join(root, "missing")},
+		{name: "not a directory", path: filepath.Join(parent, "trigger")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if conditionAlreadySatisfied(cli.ConditionSpec{Kind: cli.FileKind, Path: tc.path}, time.Time{}, defaultRuntimeClock()) {
+				t.Fatal("initial file condition is satisfied, want unsatisfied")
+			}
+		})
+	}
+}
+
+func TestRunAlternativeTriggersWhenFileStatFailsAtStartup(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "parent")
+	if err := os.WriteFile(parent, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"file:" + filepath.Join(parent, "trigger"), "--or", "duration:0s"}, unreadableReader{}, &stdout, &stderr)
+	if code != exitOK || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("run = %d, stdout = %q, stderr = %q; want exit 0 with no output", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestValidateDurationEventAcceptsGoDurationSyntax(t *testing.T) {
 	for _, event := range []string{"duration:30s", "duration:500ms", "duration:1m30s"} {
 		t.Run(event, func(t *testing.T) {
@@ -2064,17 +2097,17 @@ func TestRunRejectsEmptyFileEvent(t *testing.T) {
 	}
 }
 
-func TestRunRejectsFileEventWithInvalidPath(t *testing.T) {
+func TestRunForwardsInputWhenFileStatFails(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"file:" + string([]byte{0})}, unreadableReader{}, &stdout, &stderr)
-	if code != exitArgError {
-		t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitArgError, stderr.String())
+	code := run([]string{"file:" + string([]byte{0})}, strings.NewReader("input"), &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty", stdout.String())
+	if stdout.String() != "input" {
+		t.Fatalf("stdout = %q, want input", stdout.String())
 	}
-	if stderr.Len() == 0 {
-		t.Fatal("stderr is empty, want argument diagnostic")
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
 }
 
