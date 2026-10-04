@@ -36,12 +36,11 @@ func (condition *dateTimeCondition) run(ctx context.Context, _ Mode, _ *runRegis
 	current := now()
 
 	if deadline.After(current) {
-		wait := deadline.Sub(current)
 		current = now()
-		wait = deadline.Sub(current)
+		wait := deadline.Sub(current)
 		if wait > 0 {
 			capped := !current.Add(wait).Equal(deadline)
-			timerC, stopTimer := condition.runtime.newTimer(cappedWait(wait))
+			timerC, stopTimer := condition.runtime.newTimer(wait)
 			if timerC != nil {
 				go condition.emitDeadline(ctx, events, deadline, timerC, stopTimer, capped)
 				return events
@@ -100,7 +99,7 @@ func (condition *dateTimeCondition) emitDeadline(ctx context.Context, events cha
 			}
 			stopTimerOnce()
 			capped = !current.Add(wait).Equal(deadline)
-			timerC, stopTimer = condition.runtime.newTimer(cappedWait(wait))
+			timerC, stopTimer = condition.runtime.newTimer(wait)
 			if timerC == nil {
 				stopTimerOnce()
 				return
@@ -109,16 +108,4 @@ func (condition *dateTimeCondition) emitDeadline(ctx context.Context, events cha
 			return
 		}
 	}
-}
-
-const maxTimerDuration = time.Duration(1<<63 - 1)
-
-func cappedWait(wait time.Duration) time.Duration {
-	if wait < 0 {
-		return 0
-	}
-	if wait > maxTimerDuration {
-		return maxTimerDuration
-	}
-	return wait
 }

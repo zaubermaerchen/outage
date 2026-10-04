@@ -10,6 +10,27 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.0'
+      - name: Check formatting
+        shell: bash
+        run: |
+          files=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 -checks='SA*,S*,U*' ./...
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
