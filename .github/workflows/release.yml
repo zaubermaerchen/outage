@@ -164,6 +164,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      homebrew-eligible: ${{ steps.homebrew-eligibility.outputs.homebrew-eligible }}
     permissions:
       contents: write
     env:
@@ -201,3 +203,30 @@ jobs:
             --title "$VERSION" \
             --generate-notes \
             "${archives[@]}" SHA256SUMS
+
+      - name: Classify Homebrew release
+        id: homebrew-eligibility
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          if [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'homebrew-eligible=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'homebrew-eligible=false' >> "$GITHUB_OUTPUT"
+          fi
+
+  homebrew:
+    name: Propose Homebrew Formula update
+    if: github.event_name == 'push' && needs.publish.outputs.homebrew-eligible == 'true'
+    needs: publish
+    permissions:
+      contents: read
+    uses: zaubermaerchen/homebrew-tap/.github/workflows/update-formula.yml@18a30289f199e21a6ddd1d5be1b57f6249fe0622
+    with:
+      formula: outage
+      tag: ${{ github.ref_name }}
+      automation-ref: 18a30289f199e21a6ddd1d5be1b57f6249fe0622
+      app-id: ${{ vars.HOMEBREW_TAP_APP_ID }}
+    secrets:
+      app-private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
