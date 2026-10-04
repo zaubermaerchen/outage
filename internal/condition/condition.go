@@ -119,8 +119,11 @@ func newTimer(delay time.Duration) (<-chan time.Time, func()) {
 }
 
 // internalCondition lets composite conditions share one child monitor when a
-// caller uses the same leaf in more than one branch. External implementations
-// still work through the public Condition interface.
+// caller uses the same leaf in more than one branch. CLI canonicalization keeps
+// one leaf per condition specification, but overlapping OR groups reuse it:
+// (A && B) || (A && C) must broadcast one execution of A to both branches.
+// Sharing lasts for one root Run; the last subscriber leaving cancels the child.
+// External implementations still work through the public Condition interface.
 type internalCondition interface {
 	Condition
 	run(context.Context, Mode, *runRegistry) <-chan Event
