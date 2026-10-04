@@ -316,6 +316,11 @@ func buildConditionTree(plan cli.Plan, startedAt time.Time, clock runtimeClock, 
 	}
 	leaves := make([]condition.Condition, len(plan.Conditions))
 	for index, spec := range plan.Conditions {
+		switch spec.Kind {
+		case cli.DurationKind, cli.DateTimeKind, cli.FileKind, cli.SignalKind:
+		default:
+			return nil, fmt.Errorf("unsupported condition kind %q", spec.Kind)
+		}
 		id := spec.ID
 		if initialSatisfied[index] {
 			// Initial observations are latched before monitors start; represent

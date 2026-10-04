@@ -69,6 +69,30 @@ func runOutage(t *testing.T, binary string, args []string, stdin io.Reader) comm
 	return commandResult{stdout: stdout.Bytes(), stderr: stderr.Bytes(), code: code}
 }
 
+func TestBuildConditionTreeRejectsUnsupportedKind(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		satisfied bool
+	}{
+		{name: "unsatisfied"},
+		{name: "satisfied", satisfied: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := cli.Plan{
+				Conditions: []cli.ConditionSpec{{ID: "unknown:example", Kind: cli.Kind("unknown")}},
+				Groups:     [][]int{{0}},
+			}
+			root, err := buildConditionTree(plan, time.Now(), defaultRuntimeClock(), []bool{tc.satisfied})
+			if root != nil {
+				t.Fatalf("root = %v, want nil", root)
+			}
+			if err == nil || !strings.Contains(err.Error(), "unsupported condition kind") || !strings.Contains(err.Error(), "unknown") {
+				t.Fatalf("error = %v, want diagnostic identifying unsupported kind", err)
+			}
+		})
+	}
+}
+
 func TestProcessPrintsVersion(t *testing.T) {
 	tests := []struct {
 		name        string
